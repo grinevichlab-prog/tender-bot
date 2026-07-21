@@ -29,9 +29,9 @@ if sys.platform == "win32":
     try:
         import win32com.client
     except ImportError:
-        win32com.client = None
+        win32com = None
 else:
-    win32com.client = None
+    win32com = None
 
 
 def _extract_text_from_pdf(file_path: str) -> str:
