@@ -8,6 +8,6 @@ pdfplumber==0.11.4
 apscheduler==3.10.4
 aiosmtplib==3.0.1
 openpyxl==3.1.5
-pywin32==312
+pywin32==312; sys_platform == "win32"
 pytesseract==0.3.13
 Pillow==10.4.0
