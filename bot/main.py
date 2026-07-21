@@ -1,6 +1,6 @@
-"""
+r"""
 Главный модуль Telegram-бота для обработки тендеров.
-Запуск: py bot\main.py
+Запуск: py bot/main.py
 Требуется заполненный .env (TELEGRAM_TOKEN, DEEPSEEK_API_KEY, DATABASE_URL, ...)
 """
 
