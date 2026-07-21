@@ -9,6 +9,11 @@ from config.settings import DATABASE_URL
 pool = None
 
 
+async def create_pool():
+    """Создаёт и возвращает пул соединений с БД."""
+    return await asyncpg.create_pool(DATABASE_URL)
+
+
 async def set_pool(p):
     """Сохраняет пул соединений в глобальную переменную модуля."""
     global pool
