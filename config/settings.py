@@ -29,6 +29,8 @@ TENDER_GROUP_ID = int(os.getenv("TENDER_GROUP_ID", "0"))
 
 def check_settings():
     """Проверяет, что все обязательные переменные окружения заданы."""
+    # Временная отладка – выведем все переменные окружения
+    print("DEBUG: Environment keys:", list(os.environ.keys()))
     missing = []
     required = {
         "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
