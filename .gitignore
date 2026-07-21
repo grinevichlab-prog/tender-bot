@@ -1,22 +1,7 @@
 Секретные ключи — НИКОГДА не загружать на GitHub
 .env
-
-Виртуальное окружение Python
-venv/
-env/
-.venv/
-
-Кэш Python
+data/uploads/
+*.pyc
 __pycache__/
-
-Логи и данные
-logs/
-data/
-
-Системные файлы
-.DS_Store
-Thumbs.db
-
-Настройки редакторов
-.vscode/
 .idea/
+.vscode/
