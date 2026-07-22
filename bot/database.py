@@ -8,13 +8,13 @@ from config.settings import DATABASE_URL
 pool = None
 
 async def create_pool():
-    # Отключаем кэш подготовленных запросов — это решит проблему навсегда
-    return await asyncpg.create_pool(DATABASE_URL, statement_cache_size=0)
+    return await asyncpg.create_pool(DATABASE_URL)
 
 async def set_pool(p):
     global pool
     pool = p
 
+# ---------------------- СОЗДАНИЕ ТАБЛИЦ ----------------------
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -53,11 +53,12 @@ CREATE TABLE IF NOT EXISTS platforms (
     fee_min NUMERIC
 );
 
+-- chat_id и thread_id теперь TEXT
 CREATE TABLE IF NOT EXISTS tenders (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
-    chat_id BIGINT NOT NULL,
-    thread_id BIGINT,
+    chat_id TEXT NOT NULL,
+    thread_id TEXT,
     name TEXT,
     status TEXT DEFAULT 'new',
     nmck NUMERIC,
@@ -116,11 +117,32 @@ CREATE TABLE IF NOT EXISTS tender_documents (
 
 async def init_db():
     async with pool.acquire() as conn:
+        # Создаём таблицы, если их нет
         await conn.execute(CREATE_TABLES_SQL)
-        await conn.execute("ALTER TABLE tenders ALTER COLUMN chat_id TYPE BIGINT")
-        await conn.execute("ALTER TABLE tenders ALTER COLUMN thread_id TYPE BIGINT")
+
+        # Мигрируем chat_id и thread_id на TEXT, если они ещё не текст
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='tenders' AND column_name='chat_id' AND data_type != 'text'
+                ) THEN
+                    ALTER TABLE tenders ALTER COLUMN chat_id TYPE TEXT USING chat_id::TEXT;
+                END IF;
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='tenders' AND column_name='thread_id' AND data_type != 'text'
+                ) THEN
+                    ALTER TABLE tenders ALTER COLUMN thread_id TYPE TEXT USING thread_id::TEXT;
+                END IF;
+            END;
+            $$;
+        """)
+
         print("Таблицы БД проверены/созданы.")
 
+# ---------------------- ПОЛЬЗОВАТЕЛИ ----------------------
 async def get_or_create_user(telegram_id: int, name: str) -> int:
     async with pool.acquire() as conn:
         user_id = await conn.fetchval(
@@ -133,12 +155,13 @@ async def get_or_create_user(telegram_id: int, name: str) -> int:
             telegram_id, name,
         )
 
-async def create_tender_for_thread(chat_id: int, thread_id: int, user_id: int):
+# ---------------------- ТЕНДЕРЫ ----------------------
+async def create_tender_for_thread(chat_id: str, thread_id: str, user_id: int):
     async with pool.acquire() as conn:
         tender_id = await conn.fetchval(
             """
             INSERT INTO tenders (user_id, chat_id, thread_id)
-            VALUES ($1, $2::bigint, $3::bigint)
+            VALUES ($1, $2, $3)
             ON CONFLICT (chat_id, thread_id) DO NOTHING
             RETURNING id
             """,
@@ -146,15 +169,15 @@ async def create_tender_for_thread(chat_id: int, thread_id: int, user_id: int):
         )
         if tender_id is None:
             tender_id = await conn.fetchval(
-                "SELECT id FROM tenders WHERE chat_id = $1::bigint AND thread_id = $2::bigint",
+                "SELECT id FROM tenders WHERE chat_id = $1 AND thread_id = $2",
                 chat_id, thread_id,
             )
         return tender_id
 
-async def get_tender_by_thread(chat_id: int, thread_id: int) -> dict | None:
+async def get_tender_by_thread(chat_id: str, thread_id: str) -> dict | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM tenders WHERE chat_id = $1::bigint AND thread_id = $2::bigint",
+            "SELECT * FROM tenders WHERE chat_id = $1 AND thread_id = $2",
             chat_id, thread_id,
         )
         return dict(row) if row else None
@@ -194,6 +217,7 @@ async def set_summary_message_id(tender_id: int, message_id: int):
             message_id, tender_id,
         )
 
+# ---------------------- ДОКУМЕНТЫ ----------------------
 async def add_tender_document(
     tender_id: int,
     file_name: str,

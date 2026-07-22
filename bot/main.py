@@ -68,7 +68,7 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
     user_id = message.from_user.id
 
     await db.get_or_create_user(user_id, message.from_user.full_name)
-    tender_id = await db.create_tender_for_thread(chat_id, thread_id, user_id)
+  tender_id = await db.create_tender_for_thread(str(chat_id), str(thread_id), user_id)
 
     analyses = []
     for file_info in files:
@@ -99,7 +99,7 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
 
     card_text = build_tender_card(merged)
 
-    tender = await db.get_tender_by_thread(chat_id, thread_id)
+    tender = await db.get_tender_by_thread(str(chat_id), str(thread_id))
     if tender and tender.get("summary_message_id"):
         try:
             await bot.edit_message_text(
