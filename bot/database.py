@@ -8,13 +8,13 @@ from config.settings import DATABASE_URL
 pool = None
 
 async def create_pool():
-    return await asyncpg.create_pool(DATABASE_URL)
+    # Отключаем кэш подготовленных запросов — это решит проблему навсегда
+    return await asyncpg.create_pool(DATABASE_URL, statement_cache_size=0)
 
 async def set_pool(p):
     global pool
     pool = p
 
-# ---------------------- СОЗДАНИЕ ТАБЛИЦ ----------------------
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -117,14 +117,10 @@ CREATE TABLE IF NOT EXISTS tender_documents (
 async def init_db():
     async with pool.acquire() as conn:
         await conn.execute(CREATE_TABLES_SQL)
-
-        # Убедимся, что типы chat_id и thread_id точно BIGINT
         await conn.execute("ALTER TABLE tenders ALTER COLUMN chat_id TYPE BIGINT")
         await conn.execute("ALTER TABLE tenders ALTER COLUMN thread_id TYPE BIGINT")
-
         print("Таблицы БД проверены/созданы.")
 
-# ---------------------- ПОЛЬЗОВАТЕЛИ ----------------------
 async def get_or_create_user(telegram_id: int, name: str) -> int:
     async with pool.acquire() as conn:
         user_id = await conn.fetchval(
@@ -137,10 +133,8 @@ async def get_or_create_user(telegram_id: int, name: str) -> int:
             telegram_id, name,
         )
 
-# ---------------------- ТЕНДЕРЫ ----------------------
 async def create_tender_for_thread(chat_id: int, thread_id: int, user_id: int):
     async with pool.acquire() as conn:
-        # Явное приведение к bigint в запросе
         tender_id = await conn.fetchval(
             """
             INSERT INTO tenders (user_id, chat_id, thread_id)
@@ -200,7 +194,6 @@ async def set_summary_message_id(tender_id: int, message_id: int):
             message_id, tender_id,
         )
 
-# ---------------------- ДОКУМЕНТЫ ----------------------
 async def add_tender_document(
     tender_id: int,
     file_name: str,
