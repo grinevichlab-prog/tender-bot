@@ -68,7 +68,9 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
     user_id = message.from_user.id
 
     await db.get_or_create_user(user_id, message.from_user.full_name)
-  tender_id = await db.create_tender_for_thread(str(chat_id), str(thread_id), user_id)
+
+    # Передаём chat_id и thread_id как строки (т.к. в БД теперь TEXT)
+    tender_id = await db.create_tender_for_thread(str(chat_id), str(thread_id), user_id)
 
     analyses = []
     for file_info in files:
@@ -99,6 +101,7 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
 
     card_text = build_tender_card(merged)
 
+    # Получаем тендер, передавая строки
     tender = await db.get_tender_by_thread(str(chat_id), str(thread_id))
     if tender and tender.get("summary_message_id"):
         try:
