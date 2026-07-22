@@ -1,7 +1,7 @@
-r"""
+"""
 Главный модуль Telegram-бота для обработки тендеров.
 Запуск: py bot/main.py
-...
+Требуется заполненный .env (TELEGRAM_TOKEN, YANDEX_API_KEY, DATABASE_URL, ...)
 """
 
 import asyncio
@@ -15,12 +15,7 @@ from aiogram.types import Message
 from config.settings import (
     TELEGRAM_TOKEN, TENDER_GROUP_ID, check_settings,
 )
-from bot.database import (
-    set_pool, init_db, get_or_create_user,
-    create_tender_for_thread, update_tender_analysis,
-    add_tender_document, get_tender_documents, get_tender_by_thread,
-    set_summary_message_id,
-)
+import bot.database as db
 from bot.parser import extract_text
 from bot.ai_analyzer import analyze_tender_document, merge_analyses
 
@@ -272,7 +267,6 @@ async def main():
     check_settings()
 
     # Инициализация БД
-    import bot.database as db
     db_pool = await db.create_pool()
     await db.set_pool(db_pool)
     await db.init_db()
