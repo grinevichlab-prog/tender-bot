@@ -8,7 +8,8 @@ from config.settings import DATABASE_URL
 pool = None
 
 async def create_pool():
-    return await asyncpg.create_pool(DATABASE_URL)
+    # Отключаем кэш подготовленных запросов, чтобы избежать ошибок с типами
+    return await asyncpg.create_pool(DATABASE_URL, statement_cache_size=0)
 
 async def set_pool(p):
     global pool
@@ -117,10 +118,10 @@ CREATE TABLE IF NOT EXISTS tender_documents (
 
 async def init_db():
     async with pool.acquire() as conn:
-        # Создаём таблицы, если их нет
+        # Создаём таблицы
         await conn.execute(CREATE_TABLES_SQL)
 
-        # Мигрируем chat_id и thread_id на TEXT, если они ещё не текст
+        # Миграция: если столбцы chat_id, thread_id не TEXT, меняем тип
         await conn.execute("""
             DO $$
             BEGIN
