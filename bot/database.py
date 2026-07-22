@@ -8,7 +8,7 @@ from config.settings import DATABASE_URL
 pool = None
 
 async def create_pool():
-    # Отключаем кэш подготовленных запросов, чтобы избежать ошибок с типами
+    # Отключаем кэш запросов для надёжности
     return await asyncpg.create_pool(DATABASE_URL, statement_cache_size=0)
 
 async def set_pool(p):
@@ -54,10 +54,10 @@ CREATE TABLE IF NOT EXISTS platforms (
     fee_min NUMERIC
 );
 
--- chat_id и thread_id теперь TEXT
+-- Обратите внимание: user_id BIGINT, chat_id и thread_id TEXT
 CREATE TABLE IF NOT EXISTS tenders (
     id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id),
+    user_id BIGINT REFERENCES users(id),
     chat_id TEXT NOT NULL,
     thread_id TEXT,
     name TEXT,
@@ -121,7 +121,21 @@ async def init_db():
         # Создаём таблицы
         await conn.execute(CREATE_TABLES_SQL)
 
-        # Миграция: если столбцы chat_id, thread_id не TEXT, меняем тип
+        # Миграция: BIGINT для user_id
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='tenders' AND column_name='user_id' AND data_type != 'bigint'
+                ) THEN
+                    ALTER TABLE tenders ALTER COLUMN user_id TYPE BIGINT;
+                END IF;
+            END;
+            $$;
+        """)
+
+        # Миграция: TEXT для chat_id и thread_id (если ещё не текст)
         await conn.execute("""
             DO $$
             BEGIN
