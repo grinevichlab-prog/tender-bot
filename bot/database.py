@@ -15,7 +15,6 @@ async def set_pool(p):
     pool = p
 
 # ---------------------- СОЗДАНИЕ ТАБЛИЦ ----------------------
-# Таблица tenders теперь создаётся с BIGINT
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -54,10 +53,35 @@ CREATE TABLE IF NOT EXISTS platforms (
     fee_min NUMERIC
 );
 
+CREATE TABLE IF NOT EXISTS tenders (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id),
+    chat_id BIGINT NOT NULL,
+    thread_id BIGINT,
+    name TEXT,
+    status TEXT DEFAULT 'new',
+    nmck NUMERIC,
+    delivery_deadline DATE,
+    region TEXT,
+    supplier_id INTEGER REFERENCES suppliers(id),
+    final_price NUMERIC,
+    final_margin NUMERIC,
+    archived_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW(),
+    purchase_type TEXT,
+    classification TEXT,
+    summary TEXT,
+    summary_message_id BIGINT,
+    tender_name TEXT,
+    subject TEXT,
+    items JSONB,
+    UNIQUE(chat_id, thread_id)
+);
+
 CREATE TABLE IF NOT EXISTS supplier_deals (
     id SERIAL PRIMARY KEY,
     supplier_id INTEGER REFERENCES suppliers(id),
-    tender_id INTEGER,
+    tender_id INTEGER REFERENCES tenders(id),
     product_name TEXT,
     price_total NUMERIC,
     delivery_days_actual INTEGER,
@@ -68,7 +92,7 @@ CREATE TABLE IF NOT EXISTS supplier_deals (
 
 CREATE TABLE IF NOT EXISTS delivery_quotes (
     id SERIAL PRIMARY KEY,
-    tender_id INTEGER,
+    tender_id INTEGER REFERENCES tenders(id),
     supplier_id INTEGER REFERENCES suppliers(id),
     origin_city TEXT,
     destination_city TEXT,
@@ -80,7 +104,7 @@ CREATE TABLE IF NOT EXISTS delivery_quotes (
 
 CREATE TABLE IF NOT EXISTS tender_documents (
     id SERIAL PRIMARY KEY,
-    tender_id INTEGER,
+    tender_id INTEGER REFERENCES tenders(id),
     file_name TEXT NOT NULL,
     file_path TEXT,
     extracted_text TEXT,
@@ -92,42 +116,13 @@ CREATE TABLE IF NOT EXISTS tender_documents (
 
 async def init_db():
     async with pool.acquire() as conn:
-        # Создаём все таблицы, кроме tenders (она создаётся позже)
         await conn.execute(CREATE_TABLES_SQL)
 
-        # Удаляем старую таблицу tenders, если она есть (каскадно удалятся связанные записи)
-        print("Пересоздаём таблицу tenders с BIGINT...")
-        await conn.execute("DROP TABLE IF EXISTS tenders CASCADE")
+        # Убедимся, что типы chat_id и thread_id точно BIGINT
+        await conn.execute("ALTER TABLE tenders ALTER COLUMN chat_id TYPE BIGINT")
+        await conn.execute("ALTER TABLE tenders ALTER COLUMN thread_id TYPE BIGINT")
 
-        # Создаём новую таблицу tenders с правильными типами
-        await conn.execute("""
-            CREATE TABLE tenders (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER REFERENCES users(id),
-                chat_id BIGINT NOT NULL,
-                thread_id BIGINT,
-                name TEXT,
-                status TEXT DEFAULT 'new',
-                nmck NUMERIC,
-                delivery_deadline DATE,
-                region TEXT,
-                supplier_id INTEGER REFERENCES suppliers(id),
-                final_price NUMERIC,
-                final_margin NUMERIC,
-                archived_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT NOW(),
-                purchase_type TEXT,
-                classification TEXT,
-                summary TEXT,
-                summary_message_id BIGINT,
-                tender_name TEXT,
-                subject TEXT,
-                items JSONB,
-                UNIQUE(chat_id, thread_id)
-            )
-        """)
-
-    print("Таблицы БД проверены/созданы.")
+        print("Таблицы БД проверены/созданы.")
 
 # ---------------------- ПОЛЬЗОВАТЕЛИ ----------------------
 async def get_or_create_user(telegram_id: int, name: str) -> int:
@@ -145,10 +140,11 @@ async def get_or_create_user(telegram_id: int, name: str) -> int:
 # ---------------------- ТЕНДЕРЫ ----------------------
 async def create_tender_for_thread(chat_id: int, thread_id: int, user_id: int):
     async with pool.acquire() as conn:
+        # Явное приведение к bigint в запросе
         tender_id = await conn.fetchval(
             """
             INSERT INTO tenders (user_id, chat_id, thread_id)
-            VALUES ($1, $2, $3)
+            VALUES ($1, $2::bigint, $3::bigint)
             ON CONFLICT (chat_id, thread_id) DO NOTHING
             RETURNING id
             """,
@@ -156,7 +152,7 @@ async def create_tender_for_thread(chat_id: int, thread_id: int, user_id: int):
         )
         if tender_id is None:
             tender_id = await conn.fetchval(
-                "SELECT id FROM tenders WHERE chat_id = $1 AND thread_id = $2",
+                "SELECT id FROM tenders WHERE chat_id = $1::bigint AND thread_id = $2::bigint",
                 chat_id, thread_id,
             )
         return tender_id
@@ -164,7 +160,7 @@ async def create_tender_for_thread(chat_id: int, thread_id: int, user_id: int):
 async def get_tender_by_thread(chat_id: int, thread_id: int) -> dict | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM tenders WHERE chat_id = $1 AND thread_id = $2",
+            "SELECT * FROM tenders WHERE chat_id = $1::bigint AND thread_id = $2::bigint",
             chat_id, thread_id,
         )
         return dict(row) if row else None
