@@ -122,9 +122,45 @@ CREATE TABLE IF NOT EXISTS tender_documents (
 
 
 async def init_db():
-    """Выполняет создание таблиц при старте."""
+    """Выполняет создание таблиц и миграции при старте."""
     async with pool.acquire() as conn:
+        # Создаём таблицы, если их нет
         await conn.execute(CREATE_TABLES_SQL)
+
+        # Миграция: добавляем chat_id и thread_id, если они отсутствуют
+        # Проверяем наличие столбца chat_id
+        has_chat_id = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='tenders' AND column_name='chat_id')"
+        )
+        if not has_chat_id:
+            print("Добавляем столбец chat_id в tenders...")
+            await conn.execute("ALTER TABLE tenders ADD COLUMN chat_id BIGINT")
+            # Если столбца не было, thread_id тоже может отсутствовать
+            has_thread_id = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                "WHERE table_name='tenders' AND column_name='thread_id')"
+            )
+            if not has_thread_id:
+                await conn.execute("ALTER TABLE tenders ADD COLUMN thread_id BIGINT")
+            # Заполняем chat_id значением по умолчанию для существующих записей (возможно, 0)
+            # Но лучше установить NOT NULL после заполнения, если требуется.
+            # Пока оставим без NOT NULL, чтобы не сломать старые записи.
+            # При желании можно потом обновить и установить NOT NULL.
+            print("Столбцы chat_id и thread_id добавлены.")
+
+        # Убедимся, что существует уникальный индекс для (chat_id, thread_id),
+        # если его ещё нет. Создадим, если отсутствует.
+        index_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='tenders_chat_thread_unique')"
+        )
+        if not index_exists:
+            print("Создаём уникальный индекс на (chat_id, thread_id)...")
+            await conn.execute(
+                "CREATE UNIQUE INDEX tenders_chat_thread_unique ON tenders (chat_id, thread_id) "
+                "WHERE chat_id IS NOT NULL AND thread_id IS NOT NULL"
+            )
+
     print("Таблицы БД проверены/созданы.")
 
 
