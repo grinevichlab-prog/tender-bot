@@ -176,11 +176,11 @@ async def create_tender_for_thread(chat_id: str, thread_id: str, user_id: int):
         tender_id = await conn.fetchval(
             """
             INSERT INTO tenders (user_id, chat_id, thread_id)
-            VALUES ($1, $2, $3)
+            VALUES ($3, $1, $2)
             ON CONFLICT (chat_id, thread_id) DO NOTHING
             RETURNING id
             """,
-            user_id, chat_id, thread_id,
+            chat_id, thread_id, user_id,
         )
         if tender_id is None:
             tender_id = await conn.fetchval(
