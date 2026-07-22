@@ -15,6 +15,7 @@ async def set_pool(p):
     pool = p
 
 # ---------------------- СОЗДАНИЕ ТАБЛИЦ ----------------------
+# Таблица tenders теперь создаётся с BIGINT
 CREATE_TABLES_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -53,35 +54,10 @@ CREATE TABLE IF NOT EXISTS platforms (
     fee_min NUMERIC
 );
 
-CREATE TABLE IF NOT EXISTS tenders (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id),
-    chat_id BIGINT NOT NULL,
-    thread_id BIGINT,
-    name TEXT,
-    status TEXT DEFAULT 'new',
-    nmck NUMERIC,
-    delivery_deadline DATE,
-    region TEXT,
-    supplier_id INTEGER REFERENCES suppliers(id),
-    final_price NUMERIC,
-    final_margin NUMERIC,
-    archived_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT NOW(),
-    purchase_type TEXT,
-    classification TEXT,
-    summary TEXT,
-    summary_message_id BIGINT,
-    tender_name TEXT,
-    subject TEXT,
-    items JSONB,
-    UNIQUE(chat_id, thread_id)
-);
-
 CREATE TABLE IF NOT EXISTS supplier_deals (
     id SERIAL PRIMARY KEY,
     supplier_id INTEGER REFERENCES suppliers(id),
-    tender_id INTEGER REFERENCES tenders(id),
+    tender_id INTEGER,
     product_name TEXT,
     price_total NUMERIC,
     delivery_days_actual INTEGER,
@@ -92,7 +68,7 @@ CREATE TABLE IF NOT EXISTS supplier_deals (
 
 CREATE TABLE IF NOT EXISTS delivery_quotes (
     id SERIAL PRIMARY KEY,
-    tender_id INTEGER REFERENCES tenders(id),
+    tender_id INTEGER,
     supplier_id INTEGER REFERENCES suppliers(id),
     origin_city TEXT,
     destination_city TEXT,
@@ -104,7 +80,7 @@ CREATE TABLE IF NOT EXISTS delivery_quotes (
 
 CREATE TABLE IF NOT EXISTS tender_documents (
     id SERIAL PRIMARY KEY,
-    tender_id INTEGER REFERENCES tenders(id),
+    tender_id INTEGER,
     file_name TEXT NOT NULL,
     file_path TEXT,
     extracted_text TEXT,
@@ -116,34 +92,40 @@ CREATE TABLE IF NOT EXISTS tender_documents (
 
 async def init_db():
     async with pool.acquire() as conn:
+        # Создаём все таблицы, кроме tenders (она создаётся позже)
         await conn.execute(CREATE_TABLES_SQL)
 
-        # Проверяем и принудительно меняем тип chat_id на BIGINT
-        col_type = await conn.fetchval(
-            "SELECT data_type FROM information_schema.columns WHERE table_name='tenders' AND column_name='chat_id'"
-        )
-        if col_type and col_type.lower() != 'bigint':
-            print(f"Меняем тип chat_id с {col_type} на BIGINT...")
-            await conn.execute("ALTER TABLE tenders ALTER COLUMN chat_id TYPE BIGINT")
+        # Удаляем старую таблицу tenders, если она есть (каскадно удалятся связанные записи)
+        print("Пересоздаём таблицу tenders с BIGINT...")
+        await conn.execute("DROP TABLE IF EXISTS tenders CASCADE")
 
-        # То же для thread_id
-        col_type = await conn.fetchval(
-            "SELECT data_type FROM information_schema.columns WHERE table_name='tenders' AND column_name='thread_id'"
-        )
-        if col_type and col_type.lower() != 'bigint':
-            print(f"Меняем тип thread_id с {col_type} на BIGINT...")
-            await conn.execute("ALTER TABLE tenders ALTER COLUMN thread_id TYPE BIGINT")
-
-        # Уникальный индекс для (chat_id, thread_id), если ещё нет
-        index_exists = await conn.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='tenders_chat_thread_unique')"
-        )
-        if not index_exists:
-            print("Создаём уникальный индекс на (chat_id, thread_id)...")
-            await conn.execute(
-                "CREATE UNIQUE INDEX tenders_chat_thread_unique ON tenders (chat_id, thread_id) "
-                "WHERE chat_id IS NOT NULL AND thread_id IS NOT NULL"
+        # Создаём новую таблицу tenders с правильными типами
+        await conn.execute("""
+            CREATE TABLE tenders (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id),
+                chat_id BIGINT NOT NULL,
+                thread_id BIGINT,
+                name TEXT,
+                status TEXT DEFAULT 'new',
+                nmck NUMERIC,
+                delivery_deadline DATE,
+                region TEXT,
+                supplier_id INTEGER REFERENCES suppliers(id),
+                final_price NUMERIC,
+                final_margin NUMERIC,
+                archived_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW(),
+                purchase_type TEXT,
+                classification TEXT,
+                summary TEXT,
+                summary_message_id BIGINT,
+                tender_name TEXT,
+                subject TEXT,
+                items JSONB,
+                UNIQUE(chat_id, thread_id)
             )
+        """)
 
     print("Таблицы БД проверены/созданы.")
 
