@@ -5,20 +5,14 @@
 import asyncpg
 from config.settings import DATABASE_URL
 
-# Глобальная переменная для пула
 pool = None
 
-
 async def create_pool():
-    """Создаёт и возвращает пул соединений с БД."""
     return await asyncpg.create_pool(DATABASE_URL)
 
-
 async def set_pool(p):
-    """Сохраняет пул соединений в глобальную переменную модуля."""
     global pool
     pool = p
-
 
 # ---------------------- СОЗДАНИЕ ТАБЛИЦ ----------------------
 CREATE_TABLES_SQL = """
@@ -120,53 +114,30 @@ CREATE TABLE IF NOT EXISTS tender_documents (
 );
 """
 
-
 async def init_db():
-    """Выполняет создание таблиц и миграции при старте."""
     async with pool.acquire() as conn:
-        # Создаём таблицы, если их нет
         await conn.execute(CREATE_TABLES_SQL)
 
-        # Миграция: добавляем chat_id и thread_id, если они отсутствуют
-        # Проверяем наличие столбца chat_id
-        has_chat_id = await conn.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
-            "WHERE table_name='tenders' AND column_name='chat_id')"
+        # Исправление типа chat_id, если он INTEGER (старая таблица)
+        col_type = await conn.fetchval(
+            "SELECT data_type FROM information_schema.columns WHERE table_name='tenders' AND column_name='chat_id'"
         )
-        if not has_chat_id:
-            print("Добавляем столбец chat_id в tenders...")
-            await conn.execute("ALTER TABLE tenders ADD COLUMN chat_id BIGINT")
-            # Если столбца не было, thread_id тоже может отсутствовать
-            has_thread_id = await conn.fetchval(
-                "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
-                "WHERE table_name='tenders' AND column_name='thread_id')"
-            )
-            if not has_thread_id:
-                await conn.execute("ALTER TABLE tenders ADD COLUMN thread_id BIGINT")
-            # Заполняем chat_id значением по умолчанию для существующих записей (возможно, 0)
-            # Но лучше установить NOT NULL после заполнения, если требуется.
-            # Пока оставим без NOT NULL, чтобы не сломать старые записи.
-            # При желании можно потом обновить и установить NOT NULL.
-            print("Столбцы chat_id и thread_id добавлены.")
+        if col_type and col_type.lower() == 'integer':
+            print("Меняем тип chat_id на BIGINT...")
+            await conn.execute("ALTER TABLE tenders ALTER COLUMN chat_id TYPE BIGINT")
 
-        # Убедимся, что существует уникальный индекс для (chat_id, thread_id),
-        # если его ещё нет. Создадим, если отсутствует.
-        index_exists = await conn.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='tenders_chat_thread_unique')"
+        # Аналогично для thread_id
+        col_type = await conn.fetchval(
+            "SELECT data_type FROM information_schema.columns WHERE table_name='tenders' AND column_name='thread_id'"
         )
-        if not index_exists:
-            print("Создаём уникальный индекс на (chat_id, thread_id)...")
-            await conn.execute(
-                "CREATE UNIQUE INDEX tenders_chat_thread_unique ON tenders (chat_id, thread_id) "
-                "WHERE chat_id IS NOT NULL AND thread_id IS NOT NULL"
-            )
+        if col_type and col_type.lower() == 'integer':
+            print("Меняем тип thread_id на BIGINT...")
+            await conn.execute("ALTER TABLE tenders ALTER COLUMN thread_id TYPE BIGINT")
 
     print("Таблицы БД проверены/созданы.")
 
-
 # ---------------------- ПОЛЬЗОВАТЕЛИ ----------------------
 async def get_or_create_user(telegram_id: int, name: str) -> int:
-    """Возвращает ID пользователя, создаёт если не существует."""
     async with pool.acquire() as conn:
         user_id = await conn.fetchval(
             "SELECT id FROM users WHERE telegram_id = $1", telegram_id
@@ -178,10 +149,8 @@ async def get_or_create_user(telegram_id: int, name: str) -> int:
             telegram_id, name,
         )
 
-
 # ---------------------- ТЕНДЕРЫ ----------------------
 async def create_tender_for_thread(chat_id: int, thread_id: int, user_id: int):
-    """Создаёт тендер для указанной темы, если его ещё нет. Возвращает tender_id."""
     async with pool.acquire() as conn:
         tender_id = await conn.fetchval(
             """
@@ -199,9 +168,7 @@ async def create_tender_for_thread(chat_id: int, thread_id: int, user_id: int):
             )
         return tender_id
 
-
 async def get_tender_by_thread(chat_id: int, thread_id: int) -> dict | None:
-    """Возвращает запись тендера по чату и теме."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT * FROM tenders WHERE chat_id = $1 AND thread_id = $2",
@@ -209,9 +176,7 @@ async def get_tender_by_thread(chat_id: int, thread_id: int) -> dict | None:
         )
         return dict(row) if row else None
 
-
 async def update_tender_analysis(tender_id: int, analysis: dict):
-    """Обновляет поля тендера данными из объединённого анализа."""
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -239,15 +204,12 @@ async def update_tender_analysis(tender_id: int, analysis: dict):
             analysis.get("summary"),
         )
 
-
 async def set_summary_message_id(tender_id: int, message_id: int):
-    """Сохраняет ID сообщения-карточки для последующего обновления."""
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE tenders SET summary_message_id = $1 WHERE id = $2",
             message_id, tender_id,
         )
-
 
 # ---------------------- ДОКУМЕНТЫ ----------------------
 async def add_tender_document(
@@ -258,7 +220,6 @@ async def add_tender_document(
     analysis_json: dict,
     is_useful: bool,
 ):
-    """Сохраняет запись о загруженном документе и результате анализа."""
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -270,9 +231,7 @@ async def add_tender_document(
             analysis_json, is_useful,
         )
 
-
 async def get_tender_documents(tender_id: int) -> list[dict]:
-    """Возвращает список всех документов тендера."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT * FROM tender_documents WHERE tender_id = $1 ORDER BY id",
