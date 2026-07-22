@@ -118,21 +118,32 @@ async def init_db():
     async with pool.acquire() as conn:
         await conn.execute(CREATE_TABLES_SQL)
 
-        # Исправление типа chat_id, если он INTEGER (старая таблица)
+        # Проверяем и принудительно меняем тип chat_id на BIGINT
         col_type = await conn.fetchval(
             "SELECT data_type FROM information_schema.columns WHERE table_name='tenders' AND column_name='chat_id'"
         )
-        if col_type and col_type.lower() == 'integer':
-            print("Меняем тип chat_id на BIGINT...")
+        if col_type and col_type.lower() != 'bigint':
+            print(f"Меняем тип chat_id с {col_type} на BIGINT...")
             await conn.execute("ALTER TABLE tenders ALTER COLUMN chat_id TYPE BIGINT")
 
-        # Аналогично для thread_id
+        # То же для thread_id
         col_type = await conn.fetchval(
             "SELECT data_type FROM information_schema.columns WHERE table_name='tenders' AND column_name='thread_id'"
         )
-        if col_type and col_type.lower() == 'integer':
-            print("Меняем тип thread_id на BIGINT...")
+        if col_type and col_type.lower() != 'bigint':
+            print(f"Меняем тип thread_id с {col_type} на BIGINT...")
             await conn.execute("ALTER TABLE tenders ALTER COLUMN thread_id TYPE BIGINT")
+
+        # Уникальный индекс для (chat_id, thread_id), если ещё нет
+        index_exists = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname='tenders_chat_thread_unique')"
+        )
+        if not index_exists:
+            print("Создаём уникальный индекс на (chat_id, thread_id)...")
+            await conn.execute(
+                "CREATE UNIQUE INDEX tenders_chat_thread_unique ON tenders (chat_id, thread_id) "
+                "WHERE chat_id IS NOT NULL AND thread_id IS NOT NULL"
+            )
 
     print("Таблицы БД проверены/созданы.")
 
