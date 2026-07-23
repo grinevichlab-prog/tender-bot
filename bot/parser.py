@@ -37,7 +37,6 @@ else:
 def _extract_text_from_pdf(file_path: str) -> str:
     """Извлекает текст из PDF, пробуя pdfplumber, затем PyPDF2."""
     text = ""
-    # Сначала pdfplumber (лучше сохраняет разметку и таблицы)
     try:
         with pdfplumber.open(file_path) as pdf:
             for page in pdf.pages:
@@ -48,7 +47,6 @@ def _extract_text_from_pdf(file_path: str) -> str:
         pass
 
     if not text.strip():
-        # Если pdfplumber не дал текста, пытаемся PyPDF2
         try:
             with open(file_path, "rb") as f:
                 reader = PyPDF2.PdfReader(f)
@@ -70,7 +68,7 @@ def _extract_text_from_docx(file_path: str) -> str:
 
 def _extract_text_from_doc_via_com(file_path: str) -> str:
     """Только для Windows: читает .doc через Microsoft Word COM."""
-    if not win32com.client:
+    if not win32com:
         raise RuntimeError("pywin32 недоступен. .doc не может быть прочитан.")
     word = win32com.client.Dispatch("Word.Application")
     word.Visible = False
@@ -107,7 +105,6 @@ def _extract_text_from_xlsx(file_path: str) -> str:
 def _ocr_image(file_path: str) -> str:
     """Распознаёт текст с изображения через Tesseract OCR."""
     img = Image.open(file_path)
-    # Указываем языки (русский + английский)
     return pytesseract.image_to_string(img, lang="rus+eng")
 
 
@@ -126,7 +123,6 @@ def _extract_texts_from_zip(file_path: str) -> list[dict]:
             for fname in files:
                 full_path = os.path.join(root, fname)
                 ext = Path(fname).suffix.lower()
-                # Рекурсивно вызываем extract_text для каждого файла
                 try:
                     text = extract_text(full_path, ext)
                     if text and text.strip():
@@ -163,7 +159,6 @@ def extract_text(file_path: str, file_ext: str) -> str:
     elif ext in (".png", ".jpg", ".jpeg"):
         return _ocr_image(file_path)
     elif ext == ".zip":
-        # Для ZIP возвращаем объединённый текст всех файлов внутри
         texts = _extract_texts_from_zip(file_path)
         combined = []
         for item in texts:

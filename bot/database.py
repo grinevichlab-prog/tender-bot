@@ -8,12 +8,12 @@ from config.settings import DATABASE_URL
 pool = None
 
 async def create_pool():
-    # Отключаем кэш запросов для надёжности
     return await asyncpg.create_pool(DATABASE_URL, statement_cache_size=0)
 
 async def set_pool(p):
     global pool
     pool = p
+
 
 # ---------------------- СОЗДАНИЕ ТАБЛИЦ ----------------------
 CREATE_TABLES_SQL = """
@@ -54,7 +54,6 @@ CREATE TABLE IF NOT EXISTS platforms (
     fee_min NUMERIC
 );
 
--- Обратите внимание: user_id BIGINT, chat_id и thread_id TEXT
 CREATE TABLE IF NOT EXISTS tenders (
     id SERIAL PRIMARY KEY,
     user_id BIGINT REFERENCES users(id),
@@ -116,12 +115,12 @@ CREATE TABLE IF NOT EXISTS tender_documents (
 );
 """
 
+
 async def init_db():
     async with pool.acquire() as conn:
-        # Создаём таблицы
         await conn.execute(CREATE_TABLES_SQL)
 
-        # Миграция: BIGINT для user_id
+        # Миграция: user_id -> BIGINT
         await conn.execute("""
             DO $$
             BEGIN
@@ -135,7 +134,7 @@ async def init_db():
             $$;
         """)
 
-        # Миграция: TEXT для chat_id и thread_id (если ещё не текст)
+        # Миграция: chat_id, thread_id -> TEXT
         await conn.execute("""
             DO $$
             BEGIN
@@ -157,6 +156,7 @@ async def init_db():
 
         print("Таблицы БД проверены/созданы.")
 
+
 # ---------------------- ПОЛЬЗОВАТЕЛИ ----------------------
 async def get_or_create_user(telegram_id: int, name: str) -> int:
     async with pool.acquire() as conn:
@@ -169,6 +169,7 @@ async def get_or_create_user(telegram_id: int, name: str) -> int:
             "INSERT INTO users (telegram_id, name) VALUES ($1, $2) RETURNING id",
             telegram_id, name,
         )
+
 
 # ---------------------- ТЕНДЕРЫ ----------------------
 async def create_tender_for_thread(chat_id: str, thread_id: str, user_id: int):
@@ -189,6 +190,7 @@ async def create_tender_for_thread(chat_id: str, thread_id: str, user_id: int):
             )
         return tender_id
 
+
 async def get_tender_by_thread(chat_id: str, thread_id: str) -> dict | None:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -196,6 +198,7 @@ async def get_tender_by_thread(chat_id: str, thread_id: str) -> dict | None:
             chat_id, thread_id,
         )
         return dict(row) if row else None
+
 
 async def update_tender_analysis(tender_id: int, analysis: dict):
     async with pool.acquire() as conn:
@@ -225,12 +228,14 @@ async def update_tender_analysis(tender_id: int, analysis: dict):
             analysis.get("summary"),
         )
 
+
 async def set_summary_message_id(tender_id: int, message_id: int):
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE tenders SET summary_message_id = $1 WHERE id = $2",
             message_id, tender_id,
         )
+
 
 # ---------------------- ДОКУМЕНТЫ ----------------------
 async def add_tender_document(
@@ -251,6 +256,7 @@ async def add_tender_document(
             tender_id, file_name, file_path, extracted_text,
             analysis_json, is_useful,
         )
+
 
 async def get_tender_documents(tender_id: int) -> list[dict]:
     async with pool.acquire() as conn:

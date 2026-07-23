@@ -1,6 +1,5 @@
 """
 Модуль анализа тендерных документов через YandexGPT API.
-Сохраняет обратную совместимость по структуре ответа.
 """
 
 import json
@@ -39,17 +38,12 @@ FALLBACK_RESULT = {
 
 
 def truncate_text(text: str, max_len: int = 20000) -> str:
-    """Обрезает текст до заданной длины, сохраняя целостность слов."""
     if len(text) <= max_len:
         return text
     return text[:max_len].rsplit(" ", 1)[0] + "…"
 
 
 async def analyze_tender_document(text: str) -> dict:
-    """
-    Отправляет текст документа в YandexGPT и возвращает распарсенный JSON.
-    В случае любой ошибки возвращает FALLBACK_RESULT.
-    """
     if not text or not text.strip():
         return FALLBACK_RESULT.copy()
 
@@ -81,7 +75,6 @@ async def analyze_tender_document(text: str) -> dict:
                 data = await resp.json()
                 content = data["result"]["alternatives"][0]["message"]["text"].strip()
 
-                # Пытаемся распарсить JSON
                 try:
                     result = json.loads(content)
                 except json.JSONDecodeError:
@@ -91,7 +84,6 @@ async def analyze_tender_document(text: str) -> dict:
                     else:
                         raise
 
-                # Валидация структуры
                 for key in FALLBACK_RESULT:
                     result.setdefault(key, None if key != "items" else [])
                 return result
@@ -102,14 +94,9 @@ async def analyze_tender_document(text: str) -> dict:
 
 
 def merge_analyses(analyses: list[dict]) -> dict:
-    """
-    Объединяет несколько результатов анализа (от разных документов одного тендера)
-    в один сводный JSON.
-    """
     merged = FALLBACK_RESULT.copy()
     merged["has_useful_data"] = any(a.get("has_useful_data") for a in analyses)
 
-    # Собираем все позиции, суммируя количества по названию
     items_dict = {}
     for a in analyses:
         for item in a.get("items", []):
@@ -133,18 +120,15 @@ def merge_analyses(analyses: list[dict]) -> dict:
                 }
     merged["items"] = list(items_dict.values()) if items_dict else []
 
-    # Выбираем лучшее значение для строковых полей (самое длинное непустое)
     for field in ["tender_name", "subject", "region", "purchase_type", "classification", "summary"]:
         candidates = [a.get(field) for a in analyses if a.get(field)]
         if candidates:
             merged[field] = max(candidates, key=lambda x: len(str(x)))
 
-    # delivery_deadline — самая дальняя дата
     deadlines = [a.get("delivery_deadline") for a in analyses if a.get("delivery_deadline")]
     if deadlines:
         merged["delivery_deadline"] = max(deadlines)
 
-    # НМЦ — максимальное значение
     nmck_values = [a.get("nmck") for a in analyses if a.get("nmck") is not None]
     if nmck_values:
         merged["nmck"] = max(nmck_values)
