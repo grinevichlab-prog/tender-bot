@@ -1,11 +1,11 @@
 r"""
 Главный модуль Telegram-бота для обработки тендеров.
-Запуск: py bot/main.py
+Запуск: py -m bot.main
 Требуется заполненный .env (TELEGRAM_TOKEN, YANDEX_API_KEY, DATABASE_URL, ...)
 """
 
-import json
 import asyncio
+import json
 from pathlib import Path
 from collections import defaultdict
 
@@ -70,7 +70,6 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
 
     internal_user_id = await db.get_or_create_user(telegram_user_id, message.from_user.full_name)
 
-    # chat_id и thread_id передаём как строки (в БД теперь TEXT)
     tender_id = await db.create_tender_for_thread(str(chat_id), str(thread_id), internal_user_id)
 
     for file_info in files:
@@ -78,7 +77,8 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
         file_name = file_info["name"]
         file_ext = Path(file_name).suffix.lower()
 
-       print(f"[process_documents] обрабатываю файл {file_name}", flush=True)
+        print(f"[process_documents] обрабатываю файл {file_name}", flush=True)
+
         try:
             text = await asyncio.wait_for(
                 asyncio.to_thread(extract_text, file_path, file_ext),
@@ -93,13 +93,15 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
 
         print(f"[process_documents] текст из {file_name} готов, символов: {len(text)}", flush=True)
 
-        try:
-            analysis = await asyncio.wait_for(
-                analyze_tender_document(text), timeout=60
-            ) if text else {}
-        except asyncio.TimeoutError:
-            print(f"[process_documents] ТАЙМАУТ при анализе {file_name} через YandexGPT", flush=True)
-            analysis = {}
+        analysis = {}
+        if text:
+            try:
+                analysis = await asyncio.wait_for(
+                    analyze_tender_document(text), timeout=60
+                )
+            except asyncio.TimeoutError:
+                print(f"[process_documents] ТАЙМАУТ при анализе {file_name} через YandexGPT", flush=True)
+                analysis = {}
 
         print(f"[process_documents] анализ {file_name} готов: has_useful_data={analysis.get('has_useful_data')}", flush=True)
 
