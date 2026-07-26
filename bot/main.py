@@ -4,6 +4,7 @@ r"""
 Требуется заполненный .env (TELEGRAM_TOKEN, YANDEX_API_KEY, DATABASE_URL, ...)
 """
 
+import json
 import asyncio
 from pathlib import Path
 from collections import defaultdict
@@ -72,7 +73,6 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
     # chat_id и thread_id передаём как строки (в БД теперь TEXT)
     tender_id = await db.create_tender_for_thread(str(chat_id), str(thread_id), internal_user_id)
 
-    analyses = []
     for file_info in files:
         file_path = file_info["path"]
         file_name = file_info["name"]
@@ -85,7 +85,6 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
             text = ""
 
         analysis = await analyze_tender_document(text) if text else {}
-        analyses.append(analysis)
 
         await db.add_tender_document(
             tender_id=tender_id,
@@ -96,7 +95,18 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
             is_useful=analysis.get("has_useful_data", False),
         )
 
-    merged = merge_analyses(analyses)
+    # Берём ВСЕ документы этого тендера (а не только присланные сейчас),
+    # чтобы карточка учитывала данные из всех файлов темы, а не перезатирала их
+    all_docs = await db.get_tender_documents(tender_id)
+    all_analyses = []
+    for doc in all_docs:
+        raw = doc.get("analysis_json")
+        if not raw:
+            continue
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        all_analyses.append(parsed)
+
+    merged = merge_analyses(all_analyses)
     await db.update_tender_analysis(tender_id, merged)
 
     card_text = build_tender_card(merged)
@@ -113,13 +123,13 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
         except Exception as e:
             if "message is not modified" not in str(e):
                 print(f"Не удалось отредактировать карточку: {e}")
-            sent_msg = await bot.send_message(
-                chat_id=chat_id,
-                message_thread_id=thread_id,
-                text=card_text,
-                parse_mode="HTML",
-            )
-            await db.set_summary_message_id(tender_id, sent_msg.message_id)
+                sent_msg = await bot.send_message(
+                    chat_id=chat_id,
+                    message_thread_id=thread_id,
+                    text=card_text,
+                    parse_mode="HTML",
+                )
+                await db.set_summary_message_id(tender_id, sent_msg.message_id)
     else:
         sent_msg = await bot.send_message(
             chat_id=chat_id,
