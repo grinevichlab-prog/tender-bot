@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
-import uuid
+
 import PyPDF2
 import pdfplumber
 import docx
@@ -26,12 +26,12 @@ if sys.platform == "win32":
 else:
     win32com = None
 
+
 def _convert_doc_to_docx_via_libreoffice(doc_path: str) -> str:
     """
     Конвертирует .doc в .docx через LibreOffice (без интерфейса).
     Каждый вызов получает свой изолированный профиль, чтобы избежать
     зависания из-за файла-замка при параллельных конвертациях.
-    Возвращает путь к созданному .docx во временной папке.
     """
     output_dir = tempfile.mkdtemp()
     profile_dir = tempfile.mkdtemp()
@@ -135,7 +135,6 @@ def _extract_texts_from_zip(file_path: str) -> list[dict]:
     """
     Распаковывает ZIP-архив во временную папку и рекурсивно извлекает текст
     из всех поддерживаемых файлов внутри.
-    Возвращает список словарей: {"name": имя файла, "text": текст}.
     """
     results = []
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -153,6 +152,7 @@ def _extract_texts_from_zip(file_path: str) -> list[dict]:
                 except Exception as e:
                     print(f"Ошибка при обработке файла в архиве {fname}: {e}")
     return results
+
 
 def extract_text(file_path: str, file_ext: str) -> str:
     """
