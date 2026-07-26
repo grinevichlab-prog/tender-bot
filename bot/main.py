@@ -78,13 +78,30 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
         file_name = file_info["name"]
         file_ext = Path(file_name).suffix.lower()
 
+       print(f"[process_documents] обрабатываю файл {file_name}", flush=True)
         try:
-            text = await asyncio.to_thread(extract_text, file_path, file_ext)
+            text = await asyncio.wait_for(
+                asyncio.to_thread(extract_text, file_path, file_ext),
+                timeout=90,
+            )
+        except asyncio.TimeoutError:
+            print(f"[process_documents] ТАЙМАУТ при извлечении текста из {file_name} (90 сек)", flush=True)
+            text = ""
         except Exception as e:
-            print(f"Не удалось извлечь текст из {file_name}: {e}")
+            print(f"[process_documents] Не удалось извлечь текст из {file_name}: {e}", flush=True)
             text = ""
 
-        analysis = await analyze_tender_document(text) if text else {}
+        print(f"[process_documents] текст из {file_name} готов, символов: {len(text)}", flush=True)
+
+        try:
+            analysis = await asyncio.wait_for(
+                analyze_tender_document(text), timeout=60
+            ) if text else {}
+        except asyncio.TimeoutError:
+            print(f"[process_documents] ТАЙМАУТ при анализе {file_name} через YandexGPT", flush=True)
+            analysis = {}
+
+        print(f"[process_documents] анализ {file_name} готов: has_useful_data={analysis.get('has_useful_data')}", flush=True)
 
         await db.add_tender_document(
             tender_id=tender_id,
