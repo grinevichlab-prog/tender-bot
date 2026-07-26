@@ -6,7 +6,6 @@ import json
 import aiohttp
 from config.settings import YANDEX_FOLDER_ID, YANDEX_API_KEY, YANDEX_URL
 
-# Нейтральный промпт для обхода фильтра
 SYSTEM_PROMPT = (
     "Ты — помощник для обработки документов. Проанализируй текст и верни строгий JSON.\n"
     "Поля:\n"
@@ -44,6 +43,26 @@ def truncate_text(text: str, max_len: int = 20000) -> str:
     return text[:max_len].rsplit(" ", 1)[0] + "…"
 
 
+def _clean_json(raw: str) -> str:
+    """Извлекает JSON из возможного markdown-блока."""
+    raw = raw.strip()
+    # Удаляем обрамление ```json ... ``` или ``` ... ```
+    if raw.startswith("```"):
+        # Удаляем первую строку (```json или ```)
+        lines = raw.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+    # Ищем начало и конец JSON
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return raw[start:end+1]
+    return raw
+
+
 async def analyze_tender_document(text: str) -> dict:
     if not text or not text.strip():
         return FALLBACK_RESULT.copy()
@@ -75,17 +94,12 @@ async def analyze_tender_document(text: str) -> dict:
 
                 data = await resp.json()
                 content = data["result"]["alternatives"][0]["message"]["text"].strip()
-                print(f"DEBUG YandexGPT raw content: {content}")  # Временная отладка
 
                 try:
-                    result = json.loads(content)
+                    result = json.loads(_clean_json(content))
                 except json.JSONDecodeError:
-                    if content.startswith("```"):
-                        content = content.removeprefix("```json").removesuffix("```").strip()
-                        result = json.loads(content)
-                    else:
-                        print(f"YandexGPT returned non-JSON: {content}")
-                        return FALLBACK_RESULT.copy()
+                    print(f"YandexGPT returned non-JSON after cleaning: {content}")
+                    return FALLBACK_RESULT.copy()
 
                 for key in FALLBACK_RESULT:
                     result.setdefault(key, None if key != "items" else [])
