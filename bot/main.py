@@ -111,7 +111,8 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
                 parse_mode="HTML",
             )
         except Exception as e:
-            print(f"Не удалось отредактировать карточку: {e}")
+            if "message is not modified" not in str(e):
+                print(f"Не удалось отредактировать карточку: {e}")
             sent_msg = await bot.send_message(
                 chat_id=chat_id,
                 message_thread_id=thread_id,
