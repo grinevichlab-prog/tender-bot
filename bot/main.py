@@ -105,18 +105,33 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
 
         print(f"[process_documents] анализ {file_name} готов: has_useful_data={analysis.get('has_useful_data')}", flush=True)
 
-        await db.add_tender_document(
-            tender_id=tender_id,
-            file_name=file_name,
-            file_path=file_path,
-            extracted_text=text,
-            analysis_json=analysis,
-            is_useful=analysis.get("has_useful_data", False),
-        )
+        try:
+            await asyncio.wait_for(
+                db.add_tender_document(
+                    tender_id=tender_id,
+                    file_name=file_name,
+                    file_path=file_path,
+                    extracted_text=text,
+                    analysis_json=analysis,
+                    is_useful=analysis.get("has_useful_data", False),
+                ),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            print(f"[process_documents] ТАЙМАУТ при сохранении документа {file_name} в БД", flush=True)
 
-    # Берём ВСЕ документы этого тендера (а не только присланные сейчас),
-    # чтобы карточка учитывала данные из всех файлов темы, а не перезатирала их
-    all_docs = await db.get_tender_documents(tender_id)
+        print(f"[process_documents] документ {file_name} сохранён в БД", flush=True)
+
+    print(f"[process_documents] все файлы обработаны, собираю карточку", flush=True)
+
+    try:
+        all_docs = await asyncio.wait_for(db.get_tender_documents(tender_id), timeout=30)
+    except asyncio.TimeoutError:
+        print(f"[process_documents] ТАЙМАУТ при чтении документов тендера из БД", flush=True)
+        all_docs = []
+
+    print(f"[process_documents] получено документов из БД: {len(all_docs)}", flush=True)
+
     all_analyses = []
     for doc in all_docs:
         raw = doc.get("analysis_json")
@@ -126,158 +141,40 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
         all_analyses.append(parsed)
 
     merged = merge_analyses(all_analyses)
-    await db.update_tender_analysis(tender_id, merged)
+    print(f"[process_documents] merge_analyses готов", flush=True)
+
+    try:
+        await asyncio.wait_for(db.update_tender_analysis(tender_id, merged), timeout=30)
+    except asyncio.TimeoutError:
+        print(f"[process_documents] ТАЙМАУТ при записи анализа тендера в БД", flush=True)
+
+    print(f"[process_documents] update_tender_analysis готов", flush=True)
 
     card_text = build_tender_card(merged)
 
-    tender = await db.get_tender_by_thread(str(chat_id), str(thread_id))
+    try:
+        tender = await asyncio.wait_for(
+            db.get_tender_by_thread(str(chat_id), str(thread_id)), timeout=30
+        )
+    except asyncio.TimeoutError:
+        print(f"[process_documents] ТАЙМАУТ при чтении тендера по теме из БД", flush=True)
+        tender = None
+
+    print(f"[process_documents] карточка готова, summary_message_id={tender.get('summary_message_id') if tender else None}", flush=True)
+
     if tender and tender.get("summary_message_id"):
         try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=tender["summary_message_id"],
-                text=card_text,
-                parse_mode="HTML",
-            )
-        except Exception as e:
-            if "message is not modified" not in str(e):
-                print(f"Не удалось отредактировать карточку: {e}")
-                sent_msg = await bot.send_message(
+            await asyncio.wait_for(
+                bot.edit_message_text(
                     chat_id=chat_id,
-                    message_thread_id=thread_id,
+                    message_id=tender["summary_message_id"],
                     text=card_text,
                     parse_mode="HTML",
-                )
-                await db.set_summary_message_id(tender_id, sent_msg.message_id)
-    else:
-        sent_msg = await bot.send_message(
-            chat_id=chat_id,
-            message_thread_id=thread_id,
-            text=card_text,
-            parse_mode="HTML",
-        )
-        await db.set_summary_message_id(tender_id, sent_msg.message_id)
-
-
-async def handle_attachment(message: Message, bot: Bot):
-    if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
-        return
-
-    if message.document:
-        file = message.document
-    elif message.photo:
-        file = message.photo[-1]
-    else:
-        return
-
-    TEMP_DIR = Path("data/uploads")
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
-
-    file_info = await bot.get_file(file.file_id)
-    dest_path = TEMP_DIR / file.file_name if message.document else TEMP_DIR / f"{file.file_id}.jpg"
-    await bot.download_file(file_info.file_path, destination=dest_path)
-
-    await process_documents(
-        bot=bot,
-        message=message,
-        files=[{"name": dest_path.name, "path": str(dest_path)}],
-    )
-
-
-media_buffers = defaultdict(list)
-media_timers = {}
-
-async def flush_media_group(bot: Bot, chat_id: int, thread_id: int, user_id: int):
-    buffer_key = (chat_id, thread_id)
-    files = media_buffers.pop(buffer_key, [])
-    if not files:
-        return
-
-    class FakeMessage:
-        pass
-    fake_msg = FakeMessage()
-    fake_msg.chat = type("obj", (object,), {"id": chat_id})
-    fake_msg.message_thread_id = thread_id
-    fake_msg.from_user = type("obj", (object,), {"id": user_id, "full_name": ""})
-
-    await process_documents(bot=bot, message=fake_msg, files=files)
-
-    timer = media_timers.pop(buffer_key, None)
-    if timer:
-        timer.cancel()
-
-
-async def on_media_group_message(message: Message, bot: Bot):
-    if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
-        return
-
-    chat_id = message.chat.id
-    thread_id = message.message_thread_id
-    user_id = message.from_user.id
-    buffer_key = (chat_id, thread_id)
-
-    if message.document:
-        file = message.document
-    elif message.photo:
-        file = message.photo[-1]
-    else:
-        return
-
-    TEMP_DIR = Path("data/uploads")
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    file_info = await bot.get_file(file.file_id)
-    dest_path = TEMP_DIR / (file.file_name if message.document else f"{file.file_id}.jpg")
-    await bot.download_file(file_info.file_path, destination=dest_path)
-
-    media_buffers[buffer_key].append({
-        "name": dest_path.name,
-        "path": str(dest_path),
-    })
-
-    if buffer_key in media_timers:
-        media_timers[buffer_key].cancel()
-    loop = asyncio.get_event_loop()
-    media_timers[buffer_key] = loop.call_later(
-        MEDIA_GROUP_DELAY,
-        lambda: asyncio.create_task(
-            flush_media_group(bot, chat_id, thread_id, user_id)
-        ),
-    )
-
-
-async def cmd_start(message: Message):
-    await message.answer(
-        "👋 Привет! Я бот для обработки тендеров.\n"
-        "Отправьте мне документы (PDF, DOCX, XLSX, ZIP, фото) в эту тему, "
-        "и я извлеку из них ключевые данные и создам сводную карточку."
-    )
-
-
-# ---------------------- ЗАПУСК ----------------------
-async def main():
-    check_settings()
-
-    db_pool = await db.create_pool()
-    await db.set_pool(db_pool)
-    await db.init_db()
-    print("База данных готова")
-
-    bot = Bot(token=TELEGRAM_TOKEN)
-    dp = Dispatcher()
-
-    dp.message.register(cmd_start, Command("start"))
-
-    @dp.message(F.document | F.photo, ~F.media_group_id)
-    async def single_attachment_handler(message: Message, bot: Bot = bot):
-        await handle_attachment(message, bot)
-
-    @dp.message(F.document | F.photo, F.media_group_id)
-    async def media_group_handler(message: Message, bot: Bot = bot):
-        await on_media_group_message(message, bot)
-
-    print("Бот запущен")
-    await dp.start_polling(bot)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+                ),
+                timeout=30,
+            )
+            print(f"[process_documents] карточка отредактирована", flush=True)
+        except asyncio.TimeoutError:
+            print(f"[process_documents] ТАЙМАУТ при редактировании сообщения в Telegram", flush=True)
+        except Exception as e:
+            if "message is not modified" not in str(e):
