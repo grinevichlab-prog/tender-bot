@@ -154,43 +154,45 @@ def _extract_texts_from_zip(file_path: str) -> list[dict]:
                     print(f"Ошибка при обработке файла в архиве {fname}: {e}")
     return results
 
-
 def extract_text(file_path: str, file_ext: str) -> str:
     """
     Диспетчер: выбирает нужную функцию извлечения по расширению.
-    Теперь .doc на Linux конвертируется через LibreOffice.
     """
     ext = file_ext.lower()
+    print(f"[extract_text] начинаю обработку {file_path} ({ext})", flush=True)
 
     if ext == ".pdf":
-        return _extract_text_from_pdf(file_path)
+        result = _extract_text_from_pdf(file_path)
     elif ext == ".docx":
-        return _extract_text_from_docx(file_path)
+        result = _extract_text_from_docx(file_path)
     elif ext == ".doc":
         if sys.platform == "win32":
-            return _extract_text_from_doc_via_com(file_path)
+            result = _extract_text_from_doc_via_com(file_path)
         else:
-            # На Linux конвертируем через LibreOffice
+            print(f"[extract_text] конвертирую .doc через LibreOffice: {file_path}", flush=True)
             docx_path = _convert_doc_to_docx_via_libreoffice(file_path)
+            print(f"[extract_text] конвертация завершена, читаю текст: {docx_path}", flush=True)
             try:
-                return _extract_text_from_docx(docx_path)
+                result = _extract_text_from_docx(docx_path)
             finally:
-                # Удаляем временный docx
                 try:
                     os.remove(docx_path)
                 except Exception:
                     pass
     elif ext in (".xlsx", ".xlsm"):
-        return _extract_text_from_xlsx(file_path)
+        result = _extract_text_from_xlsx(file_path)
     elif ext == ".txt":
-        return _extract_text_from_txt(file_path)
+        result = _extract_text_from_txt(file_path)
     elif ext in (".png", ".jpg", ".jpeg"):
-        return _ocr_image(file_path)
+        result = _ocr_image(file_path)
     elif ext == ".zip":
         texts = _extract_texts_from_zip(file_path)
         combined = []
         for item in texts:
             combined.append(f"=== {item['name']} ===\n{item['text']}")
-        return "\n\n".join(combined)
+        result = "\n\n".join(combined)
     else:
         raise ValueError(f"Неподдерживаемый формат файла: {ext}")
+
+    print(f"[extract_text] готово, символов: {len(result)}", flush=True)
+    return result
