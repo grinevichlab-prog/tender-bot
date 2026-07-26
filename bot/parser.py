@@ -27,18 +27,34 @@ else:
     win32com = None
 
 
+import uuid
+
 def _convert_doc_to_docx_via_libreoffice(doc_path: str) -> str:
     """
     Конвертирует .doc в .docx через LibreOffice (без интерфейса).
+    Каждый вызов получает свой изолированный профиль, чтобы избежать
+    зависания из-за файла-замка при параллельных конвертациях.
     Возвращает путь к созданному .docx во временной папке.
     """
     output_dir = tempfile.mkdtemp()
-    # Запускаем LibreOffice в headless-режиме
-    subprocess.run([
-        "libreoffice", "--headless", "--convert-to", "docx",
-        "--outdir", output_dir, doc_path
-    ], check=True, timeout=30)
-    # Ищем сконвертированный файл
+    profile_dir = tempfile.mkdtemp()
+    profile_uri = f"file://{profile_dir}"
+
+    try:
+        subprocess.run(
+            [
+                "libreoffice",
+                f"-env:UserInstallation={profile_uri}",
+                "--headless", "--norestore", "--nologo",
+                "--convert-to", "docx",
+                "--outdir", output_dir, doc_path,
+            ],
+            check=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"LibreOffice завис при конвертации {doc_path}: {e}")
+
     for f in os.listdir(output_dir):
         if f.endswith(".docx"):
             return os.path.join(output_dir, f)
