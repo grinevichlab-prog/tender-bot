@@ -45,9 +45,12 @@ def build_tender_card(analysis: dict) -> str:
         lines.append(f"⚙️ Тип закупки: {analysis['purchase_type']}")
     if analysis.get("classification"):
         lines.append(f"📦 Категория: {analysis['classification']}")
-    if analysis.get("items"):
+
+    items = analysis.get("items") or []
+    if items:
+        max_items = 25
         lines.append("🛒 Позиции:")
-        for idx, item in enumerate(analysis["items"], 1):
+        for idx, item in enumerate(items[:max_items], 1):
             name = item.get("name", "—")
             qty = item.get("quantity")
             unit = item.get("unit")
@@ -57,9 +60,22 @@ def build_tender_card(analysis: dict) -> str:
                 if unit:
                     parts.append(f" {unit}")
             lines.append(" ".join(parts))
+        if len(items) > max_items:
+            lines.append(f"  ...и ещё {len(items) - max_items} позиций (см. документы)")
+
     if analysis.get("summary"):
-        lines.append(f"\n📝 {analysis['summary']}")
-    return "\n".join(lines) if lines else "Нет данных."
+        summary = analysis["summary"]
+        if len(summary) > 800:
+            summary = summary[:800] + "…"
+        lines.append(f"\n📝 {summary}")
+
+    text = "\n".join(lines) if lines else "Нет данных."
+
+    max_len = 3800
+    if len(text) > max_len:
+        text = text[:max_len] + "\n\n…(текст обрезан, полные данные в исходных файлах)"
+
+    return text
 
 
 # ---------------------- ОБРАБОТЧИКИ ----------------------
@@ -151,6 +167,7 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
     print(f"[process_documents] update_tender_analysis готов", flush=True)
 
     card_text = build_tender_card(merged)
+    print(f"[process_documents] размер карточки: {len(card_text)} символов", flush=True)
 
     try:
         tender = await asyncio.wait_for(
@@ -164,8 +181,52 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
 
     if tender and tender.get("summary_message_id"):
         try:
+            print(f"[process_documents] отправляю edit_message_text...", flush=True)
             await asyncio.wait_for(
                 bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=tender["summary_message_id"],
+                    text=card_text,
+                    parse_mode="HTML",
+                ),
+                timeout=20,
+            )
+            print(f"[process_documents] карточка отредактирована", flush=True)
+        except asyncio.TimeoutError:
+            print(f"[process_documents] ТАЙМАУТ при редактировании сообщения в Telegram (20 сек)", flush=True)
+        except Exception as e:
+            print(f"[process_documents] ошибка при редактировании: {e}", flush=True)
+            if "message is not modified" not in str(e):
+                try:
+                    sent_msg = await asyncio.wait_for(
+                        bot.send_message(
+                            chat_id=chat_id,
+                            message_thread_id=thread_id,
+                            text=card_text,
+                            parse_mode="HTML",
+                        ),
+                        timeout=20,
+                    )
+                    await db.set_summary_message_id(tender_id, sent_msg.message_id)
+                    print(f"[process_documents] новое сообщение отправлено взамен", flush=True)
+                except Exception as e2:
+                    print(f"[process_documents] не удалось отправить новое сообщение: {e2}", flush=True)
+    else:
+        try:
+            print(f"[process_documents] отправляю send_message...", flush=True)
+            sent_msg = await asyncio.wait_for(
+                bot.send_message(
+                    chat_id=chat_id,
+                    message_thread_id=thread_id,
+                    text=card_text,
+                    parse_mode="HTML",
+                ),
+                timeout=20,
+            )
+            await db.set_summary_message_id(tender_id, sent_msg.message_id)
+            print(f"[process_documents] новая карточка отправлена", flush=True)
+        except Exception as e:
+            print(f"[process_documents] не удалось отправить карточку: {e}", flush=True)
                     chat_id=chat_id,
                     message_id=tender["summary_message_id"],
                     text=card_text,
