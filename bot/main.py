@@ -65,12 +65,12 @@ def build_tender_card(analysis: dict) -> str:
 async def process_documents(bot: Bot, message: Message, files: list[dict]):
     chat_id = message.chat.id
     thread_id = message.message_thread_id
-    user_id = message.from_user.id
+    telegram_user_id = message.from_user.id
 
-    await db.get_or_create_user(user_id, message.from_user.full_name)
+    internal_user_id = await db.get_or_create_user(telegram_user_id, message.from_user.full_name)
 
     # chat_id и thread_id передаём как строки (в БД теперь TEXT)
-    tender_id = await db.create_tender_for_thread(str(chat_id), str(thread_id), user_id)
+    tender_id = await db.create_tender_for_thread(str(chat_id), str(thread_id), internal_user_id)
 
     analyses = []
     for file_info in files:
