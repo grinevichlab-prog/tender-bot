@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["tesseract", "tesseract-ocr-rus"]
+nixPkgs = ["tesseract", "tesseract-ocr-rus", "libreoffice"]

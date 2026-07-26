@@ -1,30 +1,23 @@
 """
 Модуль извлечения текста из файлов разных форматов.
-Поддерживает: PDF, DOCX, TXT, XLSX, ZIP, PNG/JPG (OCR через Tesseract).
-Старые DOC — только на Windows (через pywin32). На Linux — пропускаются.
+Теперь с поддержкой .doc через LibreOffice на Linux.
 """
 
 import os
 import sys
+import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
 
-# PDF
 import PyPDF2
 import pdfplumber
-
-# DOCX
 import docx
-
-# XLSX
 import openpyxl
-
-# Изображения (OCR)
 from PIL import Image
 import pytesseract
 
-# Только для Windows: чтение .doc через Microsoft Word
+# Только для Windows: чтение .doc через Microsoft Word COM
 if sys.platform == "win32":
     try:
         import win32com.client
@@ -32,6 +25,45 @@ if sys.platform == "win32":
         win32com = None
 else:
     win32com = None
+
+
+def _convert_doc_to_docx_via_libreoffice(doc_path: str) -> str:
+    """
+    Конвертирует .doc в .docx через LibreOffice (без интерфейса).
+    Возвращает путь к созданному .docx во временной папке.
+    """
+    output_dir = tempfile.mkdtemp()
+    # Запускаем LibreOffice в headless-режиме
+    subprocess.run([
+        "libreoffice", "--headless", "--convert-to", "docx",
+        "--outdir", output_dir, doc_path
+    ], check=True, timeout=30)
+    # Ищем сконвертированный файл
+    for f in os.listdir(output_dir):
+        if f.endswith(".docx"):
+            return os.path.join(output_dir, f)
+    raise RuntimeError("Не удалось найти сконвертированный .docx")
+
+
+def _extract_text_from_docx(file_path: str) -> str:
+    """Извлекает текст из DOCX (python-docx)."""
+    doc = docx.Document(file_path)
+    return "\n".join(paragraph.text for paragraph in doc.paragraphs)
+
+
+def _extract_text_from_doc_via_com(file_path: str) -> str:
+    """Только для Windows: читает .doc через Microsoft Word COM."""
+    if not win32com:
+        raise RuntimeError("pywin32 недоступен. .doc не может быть прочитан.")
+    word = win32com.client.Dispatch("Word.Application")
+    word.Visible = False
+    try:
+        doc = word.Documents.Open(file_path)
+        text = doc.Content.Text
+        doc.Close()
+        return text
+    finally:
+        word.Quit()
 
 
 def _extract_text_from_pdf(file_path: str) -> str:
@@ -56,29 +88,7 @@ def _extract_text_from_pdf(file_path: str) -> str:
                         text += page_text + "\n"
         except Exception:
             pass
-
     return text
-
-
-def _extract_text_from_docx(file_path: str) -> str:
-    """Извлекает текст из DOCX (python-docx)."""
-    doc = docx.Document(file_path)
-    return "\n".join(paragraph.text for paragraph in doc.paragraphs)
-
-
-def _extract_text_from_doc_via_com(file_path: str) -> str:
-    """Только для Windows: читает .doc через Microsoft Word COM."""
-    if not win32com:
-        raise RuntimeError("pywin32 недоступен. .doc не может быть прочитан.")
-    word = win32com.client.Dispatch("Word.Application")
-    word.Visible = False
-    try:
-        doc = word.Documents.Open(file_path)
-        text = doc.Content.Text
-        doc.Close()
-        return text
-    finally:
-        word.Quit()
 
 
 def _extract_text_from_txt(file_path: str) -> str:
@@ -135,9 +145,7 @@ def _extract_texts_from_zip(file_path: str) -> list[dict]:
 def extract_text(file_path: str, file_ext: str) -> str:
     """
     Диспетчер: выбирает нужную функцию извлечения по расширению.
-    Поддерживаемые расширения:
-      .pdf, .docx, .txt, .xlsx, .xlsm, .png, .jpg, .jpeg, .zip
-      .doc (только на Windows)
+    Теперь .doc на Linux конвертируется через LibreOffice.
     """
     ext = file_ext.lower()
 
@@ -149,9 +157,16 @@ def extract_text(file_path: str, file_ext: str) -> str:
         if sys.platform == "win32":
             return _extract_text_from_doc_via_com(file_path)
         else:
-            raise RuntimeError(
-                "Файлы .doc не поддерживаются на Linux. Пожалуйста, конвертируйте их в .docx."
-            )
+            # На Linux конвертируем через LibreOffice
+            docx_path = _convert_doc_to_docx_via_libreoffice(file_path)
+            try:
+                return _extract_text_from_docx(docx_path)
+            finally:
+                # Удаляем временный docx
+                try:
+                    os.remove(docx_path)
+                except Exception:
+                    pass
     elif ext in (".xlsx", ".xlsm"):
         return _extract_text_from_xlsx(file_path)
     elif ext == ".txt":
