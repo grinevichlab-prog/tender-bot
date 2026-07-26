@@ -4,6 +4,7 @@
 
 import asyncpg
 from config.settings import DATABASE_URL
+import json
 
 pool = None
 
@@ -207,7 +208,7 @@ async def update_tender_analysis(tender_id: int, analysis: dict):
             UPDATE tenders SET
                 tender_name = $2,
                 subject = $3,
-                items = $4,
+                items = $4::jsonb,
                 nmck = $5,
                 delivery_deadline = CASE WHEN $6::TEXT IS NOT NULL THEN $6::DATE ELSE delivery_deadline END,
                 region = $7,
@@ -219,7 +220,7 @@ async def update_tender_analysis(tender_id: int, analysis: dict):
             tender_id,
             analysis.get("tender_name"),
             analysis.get("subject"),
-            analysis.get("items") if analysis.get("items") else None,
+            json.dumps(analysis.get("items")) if analysis.get("items") else None,
             analysis.get("nmck"),
             analysis.get("delivery_deadline"),
             analysis.get("region"),
@@ -251,10 +252,10 @@ async def add_tender_document(
             """
             INSERT INTO tender_documents
                 (tender_id, file_name, file_path, extracted_text, analysis_json, is_useful)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6)
             """,
             tender_id, file_name, file_path, extracted_text,
-            analysis_json, is_useful,
+            json.dumps(analysis_json) if analysis_json else None, is_useful,
         )
 
 
