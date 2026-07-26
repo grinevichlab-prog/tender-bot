@@ -178,3 +178,144 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
             print(f"[process_documents] ТАЙМАУТ при редактировании сообщения в Telegram", flush=True)
         except Exception as e:
             if "message is not modified" not in str(e):
+                print(f"Не удалось отредактировать карточку: {e}", flush=True)
+                sent_msg = await bot.send_message(
+                    chat_id=chat_id,
+                    message_thread_id=thread_id,
+                    text=card_text,
+                    parse_mode="HTML",
+                )
+                await db.set_summary_message_id(tender_id, sent_msg.message_id)
+    else:
+        sent_msg = await bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text=card_text,
+            parse_mode="HTML",
+        )
+        await db.set_summary_message_id(tender_id, sent_msg.message_id)
+        print(f"[process_documents] новая карточка отправлена", flush=True)
+
+
+async def handle_attachment(message: Message, bot: Bot):
+    if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
+        return
+
+    if message.document:
+        file = message.document
+    elif message.photo:
+        file = message.photo[-1]
+    else:
+        return
+
+    TEMP_DIR = Path("data/uploads")
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+    file_info = await bot.get_file(file.file_id)
+    dest_path = TEMP_DIR / file.file_name if message.document else TEMP_DIR / f"{file.file_id}.jpg"
+    await bot.download_file(file_info.file_path, destination=dest_path)
+
+    await process_documents(
+        bot=bot,
+        message=message,
+        files=[{"name": dest_path.name, "path": str(dest_path)}],
+    )
+
+
+media_buffers = defaultdict(list)
+media_timers = {}
+
+async def flush_media_group(bot: Bot, chat_id: int, thread_id: int, user_id: int):
+    buffer_key = (chat_id, thread_id)
+    files = media_buffers.pop(buffer_key, [])
+    if not files:
+        return
+
+    class FakeMessage:
+        pass
+    fake_msg = FakeMessage()
+    fake_msg.chat = type("obj", (object,), {"id": chat_id})
+    fake_msg.message_thread_id = thread_id
+    fake_msg.from_user = type("obj", (object,), {"id": user_id, "full_name": ""})
+
+    await process_documents(bot=bot, message=fake_msg, files=files)
+
+    timer = media_timers.pop(buffer_key, None)
+    if timer:
+        timer.cancel()
+
+
+async def on_media_group_message(message: Message, bot: Bot):
+    if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
+        return
+
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id
+    user_id = message.from_user.id
+    buffer_key = (chat_id, thread_id)
+
+    if message.document:
+        file = message.document
+    elif message.photo:
+        file = message.photo[-1]
+    else:
+        return
+
+    TEMP_DIR = Path("data/uploads")
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    file_info = await bot.get_file(file.file_id)
+    dest_path = TEMP_DIR / (file.file_name if message.document else f"{file.file_id}.jpg")
+    await bot.download_file(file_info.file_path, destination=dest_path)
+
+    media_buffers[buffer_key].append({
+        "name": dest_path.name,
+        "path": str(dest_path),
+    })
+
+    if buffer_key in media_timers:
+        media_timers[buffer_key].cancel()
+    loop = asyncio.get_event_loop()
+    media_timers[buffer_key] = loop.call_later(
+        MEDIA_GROUP_DELAY,
+        lambda: asyncio.create_task(
+            flush_media_group(bot, chat_id, thread_id, user_id)
+        ),
+    )
+
+
+async def cmd_start(message: Message):
+    await message.answer(
+        "👋 Привет! Я бот для обработки тендеров.\n"
+        "Отправьте мне документы (PDF, DOCX, XLSX, ZIP, фото) в эту тему, "
+        "и я извлеку из них ключевые данные и создам сводную карточку."
+    )
+
+
+# ---------------------- ЗАПУСК ----------------------
+async def main():
+    check_settings()
+
+    db_pool = await db.create_pool()
+    await db.set_pool(db_pool)
+    await db.init_db()
+    print("База данных готова")
+
+    bot = Bot(token=TELEGRAM_TOKEN)
+    dp = Dispatcher()
+
+    dp.message.register(cmd_start, Command("start"))
+
+    @dp.message(F.document | F.photo, ~F.media_group_id)
+    async def single_attachment_handler(message: Message, bot: Bot = bot):
+        await handle_attachment(message, bot)
+
+    @dp.message(F.document | F.photo, F.media_group_id)
+    async def media_group_handler(message: Message, bot: Bot = bot):
+        await on_media_group_message(message, bot)
+
+    print("Бот запущен")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
