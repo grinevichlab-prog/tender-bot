@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
-
+import uuid
 import PyPDF2
 import pdfplumber
 import docx
@@ -25,9 +25,6 @@ if sys.platform == "win32":
         win32com = None
 else:
     win32com = None
-
-
-import uuid
 
 def _convert_doc_to_docx_via_libreoffice(doc_path: str) -> str:
     """
