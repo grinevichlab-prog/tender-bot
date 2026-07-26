@@ -74,6 +74,7 @@ async def analyze_tender_document(text: str) -> dict:
 
                 data = await resp.json()
                 content = data["result"]["alternatives"][0]["message"]["text"].strip()
+                print(f"DEBUG YandexGPT raw content: {content}")  # Временная отладка
 
                 try:
                     result = json.loads(content)
@@ -82,7 +83,8 @@ async def analyze_tender_document(text: str) -> dict:
                         content = content.removeprefix("```json").removesuffix("```").strip()
                         result = json.loads(content)
                     else:
-                        raise
+                        print(f"YandexGPT returned non-JSON: {content}")
+                        return FALLBACK_RESULT.copy()
 
                 for key in FALLBACK_RESULT:
                     result.setdefault(key, None if key != "items" else [])
