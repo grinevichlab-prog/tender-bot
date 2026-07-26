@@ -227,35 +227,6 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
             print(f"[process_documents] новая карточка отправлена", flush=True)
         except Exception as e:
             print(f"[process_documents] не удалось отправить карточку: {e}", flush=True)
-                    chat_id=chat_id,
-                    message_id=tender["summary_message_id"],
-                    text=card_text,
-                    parse_mode="HTML",
-                ),
-                timeout=30,
-            )
-            print(f"[process_documents] карточка отредактирована", flush=True)
-        except asyncio.TimeoutError:
-            print(f"[process_documents] ТАЙМАУТ при редактировании сообщения в Telegram", flush=True)
-        except Exception as e:
-            if "message is not modified" not in str(e):
-                print(f"Не удалось отредактировать карточку: {e}", flush=True)
-                sent_msg = await bot.send_message(
-                    chat_id=chat_id,
-                    message_thread_id=thread_id,
-                    text=card_text,
-                    parse_mode="HTML",
-                )
-                await db.set_summary_message_id(tender_id, sent_msg.message_id)
-    else:
-        sent_msg = await bot.send_message(
-            chat_id=chat_id,
-            message_thread_id=thread_id,
-            text=card_text,
-            parse_mode="HTML",
-        )
-        await db.set_summary_message_id(tender_id, sent_msg.message_id)
-        print(f"[process_documents] новая карточка отправлена", flush=True)
 
 
 async def handle_attachment(message: Message, bot: Bot):
