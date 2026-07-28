@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS tenders (
     tender_name TEXT,
     subject TEXT,
     items JSONB,
+    contract_validity TEXT,
     UNIQUE(chat_id, thread_id)
 );
 
@@ -155,6 +156,11 @@ async def init_db():
             $$;
         """)
 
+        # Миграция: добавляем contract_validity, если его ещё нет
+        await conn.execute("""
+            ALTER TABLE tenders ADD COLUMN IF NOT EXISTS contract_validity TEXT;
+        """)
+
         print("Таблицы БД проверены/созданы.")
 
 
@@ -214,7 +220,8 @@ async def update_tender_analysis(tender_id: int, analysis: dict):
                 region = $7,
                 purchase_type = $8,
                 classification = $9,
-                summary = $10
+                summary = $10,
+                contract_validity = $11
             WHERE id = $1
             """,
             tender_id,
@@ -227,6 +234,7 @@ async def update_tender_analysis(tender_id: int, analysis: dict):
             analysis.get("purchase_type"),
             analysis.get("classification"),
             analysis.get("summary"),
+            analysis.get("contract_validity"),
         )
 
 
