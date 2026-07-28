@@ -39,6 +39,8 @@ def build_tender_card(analysis: dict) -> str:
         lines.append(f"💰 НМЦ: {analysis['nmck']:,.2f} руб.")
     if analysis.get("delivery_deadline"):
         lines.append(f"⏳ Срок поставки: {analysis['delivery_deadline']}")
+    if analysis.get("contract_validity"):
+        lines.append(f"📄 Срок действия договора: {analysis['contract_validity']}")
     if analysis.get("region"):
         lines.append(f"📍 Регион: {analysis['region']}")
     if analysis.get("purchase_type"):
@@ -223,56 +225,38 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
         print(f"[process_documents] ТАЙМАУТ при чтении тендера по теме из БД", flush=True)
         tender = None
 
-    print(f"[process_documents] карточка готова, summary_message_id={tender.get('summary_message_id') if tender else None}", flush=True)
+    old_message_id = tender.get("summary_message_id") if tender else None
+    print(f"[process_documents] старая карточка: summary_message_id={old_message_id}", flush=True)
 
-    if tender and tender.get("summary_message_id"):
+    # Удаляем старую карточку (если была) и отправляем новую внизу переписки,
+    # чтобы карточка всегда была на виду, а не терялась вверху истории темы.
+    if old_message_id:
         try:
-            print(f"[process_documents] отправляю edit_message_text...", flush=True)
             await asyncio.wait_for(
-                bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=tender["summary_message_id"],
-                    text=card_text,
-                    parse_mode="HTML",
-                ),
-                timeout=20,
+                bot.delete_message(chat_id=chat_id, message_id=old_message_id),
+                timeout=15,
             )
-            print(f"[process_documents] карточка отредактирована", flush=True)
+            print(f"[process_documents] старая карточка удалена", flush=True)
         except asyncio.TimeoutError:
-            print(f"[process_documents] ТАЙМАУТ при редактировании сообщения в Telegram (20 сек)", flush=True)
+            print(f"[process_documents] ТАЙМАУТ при удалении старой карточки", flush=True)
         except Exception as e:
-            print(f"[process_documents] ошибка при редактировании: {e}", flush=True)
-            if "message is not modified" not in str(e):
-                try:
-                    sent_msg = await asyncio.wait_for(
-                        bot.send_message(
-                            chat_id=chat_id,
-                            message_thread_id=thread_id,
-                            text=card_text,
-                            parse_mode="HTML",
-                        ),
-                        timeout=20,
-                    )
-                    await db.set_summary_message_id(tender_id, sent_msg.message_id)
-                    print(f"[process_documents] новое сообщение отправлено взамен", flush=True)
-                except Exception as e2:
-                    print(f"[process_documents] не удалось отправить новое сообщение: {e2}", flush=True)
-    else:
-        try:
-            print(f"[process_documents] отправляю send_message...", flush=True)
-            sent_msg = await asyncio.wait_for(
-                bot.send_message(
-                    chat_id=chat_id,
-                    message_thread_id=thread_id,
-                    text=card_text,
-                    parse_mode="HTML",
-                ),
-                timeout=20,
-            )
-            await db.set_summary_message_id(tender_id, sent_msg.message_id)
-            print(f"[process_documents] новая карточка отправлена", flush=True)
-        except Exception as e:
-            print(f"[process_documents] не удалось отправить карточку: {e}", flush=True)
+            print(f"[process_documents] не удалось удалить старую карточку (возможно уже удалена): {e}", flush=True)
+
+    try:
+        print(f"[process_documents] отправляю новую карточку...", flush=True)
+        sent_msg = await asyncio.wait_for(
+            bot.send_message(
+                chat_id=chat_id,
+                message_thread_id=thread_id,
+                text=card_text,
+                parse_mode="HTML",
+            ),
+            timeout=20,
+        )
+        await db.set_summary_message_id(tender_id, sent_msg.message_id)
+        print(f"[process_documents] новая карточка отправлена, message_id={sent_msg.message_id}", flush=True)
+    except Exception as e:
+        print(f"[process_documents] не удалось отправить карточку: {e}", flush=True)
 
 
 async def handle_attachment(message: Message, bot: Bot):
