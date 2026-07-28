@@ -3,22 +3,31 @@
 """
 
 import json
+import re
 import aiohttp
 from config.settings import YANDEX_FOLDER_ID, YANDEX_API_KEY, YANDEX_URL
 
 SYSTEM_PROMPT = """Ты — ассистент по анализу тендерной документации (техническое задание, контракт, извещение о закупке, спецификация, обоснование НМЦК).
 Это стандартная бизнес-задача извлечения деловых данных для системы автоматизации закупок юрлица, ничего конфиденциального.
 
-Тебе присылают текст документа. Извлеки ключевые данные и верни СТРОГО JSON без пояснений, без markdown-обёрток, без ```json оберток.
+Тебе присылают текст ОДНОГО документа тендера. Извлеки ключевые данные и верни СТРОГО JSON без пояснений, без markdown-обёрток.
+
+ВАЖНО, различай два РАЗНЫХ срока — их часто путают:
+- "delivery_deadline" — срок ПОСТАВКИ ТОВАРА / ВЫПОЛНЕНИЯ УСЛУГИ (когда именно товар должен быть поставлен или услуга оказана). Обычно указан в техническом задании или спецификации. Формат ГГГГ-ММ-ДД.
+- "contract_validity" — срок ДЕЙСТВИЯ САМОГО ДОГОВОРА (до какой даты договор в целом действует, включая гарантийные обязательства). Обычно указан в разделе "Срок действия договора" проекта договора. Это НЕ то же самое, что срок поставки. Пиши как есть в тексте, например "до 31.12.2027" или "12 месяцев с момента подписания".
+Если документ не содержит явного упоминания именно поставки товара с конкретной датой — НЕ заполняй delivery_deadline датой окончания договора. Оставь null.
+
+Про ПОЗИЦИИ (items) — если в документе есть техническое задание или спецификация с точным перечнем и количеством — используй именно эти точные данные (наименование, количество, единица измерения). Указывай наименование без вводных слов вроде "или эквивалент", "аналог" — только суть товара. Не создавай несколько записей для одного и того же товара, даже если он упоминается в разных формулировках в этом же документе — объединяй в одну позицию.
 
 Формат ответа (все поля обязательны, если данных нет — пиши null или пустой список, но ключ должен присутствовать всегда):
 {
-  "has_useful_data": true или false — есть ли в тексте реально полезные данные о предмете закупки, товарах, НМЦК, сроках. Если это пустой бланк, форма, доверенность, договор без конкретных цифр — false,
+  "has_useful_data": true или false — есть ли в тексте реально полезные данные о предмете закупки, товарах, НМЦК, сроках. Если это пустой бланк, форма, доверенность без конкретики — false,
   "tender_name": "короткое название тендера, 3-6 слов" или null,
   "subject": "предмет закупки одним предложением" или null,
-  "items": [{"name": "название позиции", "quantity": число или null, "unit": "единица измерения" или null}],
+  "items": [{"name": "название позиции без 'или эквивалент'", "quantity": число или null, "unit": "единица измерения" или null}],
   "nmck": число без пробелов и валюты (например 1250000.50) или null,
-  "delivery_deadline": "дата в формате ГГГГ-ММ-ДД" или null,
+  "delivery_deadline": "дата в формате ГГГГ-ММ-ДД срока ПОСТАВКИ ТОВАРА" или null,
+  "contract_validity": "срок действия ДОГОВОРА как указано в тексте (строка)" или null,
   "region": "регион или город поставки" или null,
   "purchase_type": "тип закупки" или null,
   "classification": одно из: "ТОВАР", "СМЕШАННЫЙ", "УСЛУГИ", или null,
@@ -34,11 +43,14 @@ FALLBACK_RESULT = {
     "items": [],
     "nmck": None,
     "delivery_deadline": None,
+    "contract_validity": None,
     "region": None,
     "purchase_type": None,
     "classification": None,
     "summary": None,
 }
+
+FILLER_WORDS = {"или", "эквивалент", "аналог", "шт", "шт.", "и", "либо"}
 
 
 def truncate_text(text: str, max_len: int = 20000) -> str:
@@ -61,6 +73,14 @@ def _clean_json(raw: str) -> str:
     if start != -1 and end != -1 and end > start:
         return raw[start:end + 1]
     return raw
+
+
+def _tokenize_item_name(name: str) -> set:
+    name = name.lower()
+    name = re.sub(r"[^\w\s]", " ", name)
+    tokens = set(name.split())
+    tokens -= FILLER_WORDS
+    return tokens
 
 
 async def analyze_tender_document(text: str) -> dict:
@@ -114,6 +134,52 @@ async def analyze_tender_document(text: str) -> dict:
         return FALLBACK_RESULT.copy()
 
 
+def _merge_items(source: list) -> list:
+    """
+    Объединяет позиции по смысловому совпадению (набор слов в названии),
+    а не по точному совпадению строки — чтобы "Насос гидравлический X"
+    и "Гидравлический насос X" считались одной и той же позицией.
+    """
+    merged_items = []  # список dict: name, tokens, quantity, unit
+
+    for a in source:
+        for item in a.get("items", []) or []:
+            name = (item.get("name") or "").strip()
+            if not name:
+                continue
+            tokens = _tokenize_item_name(name)
+            qty = item.get("quantity")
+            unit = item.get("unit")
+
+            match = None
+            for existing in merged_items:
+                if not tokens or not existing["tokens"]:
+                    continue
+                overlap = len(tokens & existing["tokens"])
+                smaller = min(len(tokens), len(existing["tokens"]))
+                if smaller > 0 and overlap / smaller >= 0.6:
+                    match = existing
+                    break
+
+            if match:
+                if match["quantity"] is None and qty is not None:
+                    match["quantity"] = qty
+                if match["unit"] is None and unit:
+                    match["unit"] = unit
+                if len(name) > len(match["name"]):
+                    match["name"] = name
+                    match["tokens"] = tokens
+            else:
+                merged_items.append({
+                    "name": name, "tokens": tokens, "quantity": qty, "unit": unit,
+                })
+
+    return [
+        {"name": i["name"], "quantity": i["quantity"], "unit": i["unit"]}
+        for i in merged_items
+    ]
+
+
 def merge_analyses(analyses: list) -> dict:
     merged = FALLBACK_RESULT.copy()
     useful = [a for a in analyses if a.get("has_useful_data")]
@@ -121,26 +187,9 @@ def merge_analyses(analyses: list) -> dict:
 
     source = useful if useful else analyses
 
-    items_dict = {}
-    for a in source:
-        for item in a.get("items", []) or []:
-            name = (item.get("name") or "").strip()
-            if not name:
-                continue
-            qty = item.get("quantity")
-            unit = item.get("unit")
-            if name in items_dict:
-                existing = items_dict[name]
-                if qty is not None and existing["quantity"] is not None:
-                    existing["quantity"] += qty
-                else:
-                    existing["quantity"] = existing["quantity"] or qty
-                existing["unit"] = existing["unit"] or unit
-            else:
-                items_dict[name] = {"name": name, "quantity": qty, "unit": unit}
-    merged["items"] = list(items_dict.values())
+    merged["items"] = _merge_items(source)
 
-    for field in ["tender_name", "subject", "region", "purchase_type", "classification", "summary"]:
+    for field in ["tender_name", "subject", "region", "purchase_type", "classification", "summary", "contract_validity"]:
         candidates = [a.get(field) for a in source if a.get(field)]
         if candidates:
             merged[field] = max(candidates, key=lambda x: len(str(x)))
