@@ -6,13 +6,26 @@ import json
 import aiohttp
 from config.settings import YANDEX_FOLDER_ID, YANDEX_API_KEY, YANDEX_URL
 
-SYSTEM_PROMPT = (
-    "Ты — помощник в системе автоматизации закупок для юридического лица. "
-    "Тебе присылают официальные тендерные документы (техническое задание, договор, извещение о закупке) "
-    "исключительно для извлечения деловых данных: наименований товаров, цен, сроков и регионов. "
-    "Это стандартная бизнес-задача, не содержащая ничего конфиденциального или запрещённого. "
-    "Проанализируй текст и верни строгий JSON.\n"
-)
+SYSTEM_PROMPT = """Ты — ассистент по анализу тендерной документации (техническое задание, контракт, извещение о закупке, спецификация, обоснование НМЦК).
+Это стандартная бизнес-задача извлечения деловых данных для системы автоматизации закупок юрлица, ничего конфиденциального.
+
+Тебе присылают текст документа. Извлеки ключевые данные и верни СТРОГО JSON без пояснений, без markdown-обёрток, без ```json оберток.
+
+Формат ответа (все поля обязательны, если данных нет — пиши null или пустой список, но ключ должен присутствовать всегда):
+{
+  "has_useful_data": true или false — есть ли в тексте реально полезные данные о предмете закупки, товарах, НМЦК, сроках. Если это пустой бланк, форма, доверенность, договор без конкретных цифр — false,
+  "tender_name": "короткое название тендера, 3-6 слов" или null,
+  "subject": "предмет закупки одним предложением" или null,
+  "items": [{"name": "название позиции", "quantity": число или null, "unit": "единица измерения" или null}],
+  "nmck": число без пробелов и валюты (например 1250000.50) или null,
+  "delivery_deadline": "дата в формате ГГГГ-ММ-ДД" или null,
+  "region": "регион или город поставки" или null,
+  "purchase_type": "тип закупки" или null,
+  "classification": одно из: "ТОВАР", "СМЕШАННЫЙ", "УСЛУГИ", или null,
+  "summary": "краткое описание сути закупки, 2-4 предложения"
+}
+
+Отвечай ТОЛЬКО валидным JSON, ничего больше."""
 
 FALLBACK_RESULT = {
     "has_useful_data": False,
@@ -35,22 +48,18 @@ def truncate_text(text: str, max_len: int = 20000) -> str:
 
 
 def _clean_json(raw: str) -> str:
-    """Извлекает JSON из возможного markdown-блока."""
     raw = raw.strip()
-    # Удаляем обрамление ```json ... ``` или ``` ... ```
     if raw.startswith("```"):
-        # Удаляем первую строку (```json или ```)
         lines = raw.splitlines()
         if lines[0].startswith("```"):
             lines = lines[1:]
         if lines and lines[-1].startswith("```"):
             lines = lines[:-1]
         raw = "\n".join(lines).strip()
-    # Ищем начало и конец JSON
     start = raw.find("{")
     end = raw.rfind("}")
     if start != -1 and end != -1 and end > start:
-        return raw[start:end+1]
+        return raw[start:end + 1]
     return raw
 
 
@@ -80,7 +89,7 @@ async def analyze_tender_document(text: str) -> dict:
             async with session.post(YANDEX_URL, headers=headers, json=payload) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    print(f"YandexGPT API error {resp.status}: {error_text}")
+                    print(f"YandexGPT API error {resp.status}: {error_text}", flush=True)
                     return FALLBACK_RESULT.copy()
 
                 data = await resp.json()
@@ -89,26 +98,33 @@ async def analyze_tender_document(text: str) -> dict:
                 try:
                     result = json.loads(_clean_json(content))
                 except json.JSONDecodeError:
-                    print(f"YandexGPT returned non-JSON after cleaning: {content}")
+                    print(f"YandexGPT returned non-JSON after cleaning: {content}", flush=True)
                     return FALLBACK_RESULT.copy()
 
-                for key in FALLBACK_RESULT:
-                    result.setdefault(key, None if key != "items" else [])
-                return result
+                merged = FALLBACK_RESULT.copy()
+                merged.update(result)
+                if merged.get("has_useful_data") is None:
+                    merged["has_useful_data"] = False
+                if merged.get("items") is None:
+                    merged["items"] = []
+                return merged
 
     except Exception as e:
-        print(f"Unexpected error in analyze_tender_document: {e}")
+        print(f"Unexpected error in analyze_tender_document: {e}", flush=True)
         return FALLBACK_RESULT.copy()
 
 
-def merge_analyses(analyses: list[dict]) -> dict:
+def merge_analyses(analyses: list) -> dict:
     merged = FALLBACK_RESULT.copy()
-    merged["has_useful_data"] = any(a.get("has_useful_data") for a in analyses)
+    useful = [a for a in analyses if a.get("has_useful_data")]
+    merged["has_useful_data"] = bool(useful)
+
+    source = useful if useful else analyses
 
     items_dict = {}
-    for a in analyses:
-        for item in a.get("items", []):
-            name = item.get("name", "").strip()
+    for a in source:
+        for item in a.get("items", []) or []:
+            name = (item.get("name") or "").strip()
             if not name:
                 continue
             qty = item.get("quantity")
@@ -121,23 +137,19 @@ def merge_analyses(analyses: list[dict]) -> dict:
                     existing["quantity"] = existing["quantity"] or qty
                 existing["unit"] = existing["unit"] or unit
             else:
-                items_dict[name] = {
-                    "name": name,
-                    "quantity": qty,
-                    "unit": unit,
-                }
-    merged["items"] = list(items_dict.values()) if items_dict else []
+                items_dict[name] = {"name": name, "quantity": qty, "unit": unit}
+    merged["items"] = list(items_dict.values())
 
     for field in ["tender_name", "subject", "region", "purchase_type", "classification", "summary"]:
-        candidates = [a.get(field) for a in analyses if a.get(field)]
+        candidates = [a.get(field) for a in source if a.get(field)]
         if candidates:
             merged[field] = max(candidates, key=lambda x: len(str(x)))
 
-    deadlines = [a.get("delivery_deadline") for a in analyses if a.get("delivery_deadline")]
+    deadlines = [a.get("delivery_deadline") for a in source if a.get("delivery_deadline")]
     if deadlines:
         merged["delivery_deadline"] = max(deadlines)
 
-    nmck_values = [a.get("nmck") for a in analyses if a.get("nmck") is not None]
+    nmck_values = [a.get("nmck") for a in source if a.get("nmck") is not None]
     if nmck_values:
         merged["nmck"] = max(nmck_values)
 
