@@ -1,6 +1,6 @@
 """
 Модуль извлечения текста из файлов разных форматов.
-Теперь с поддержкой .doc через LibreOffice на Linux.
+Поддержка .doc через LibreOffice на Linux.
 """
 
 import os
@@ -17,7 +17,6 @@ import openpyxl
 from PIL import Image
 import pytesseract
 
-# Только для Windows: чтение .doc через Microsoft Word COM
 if sys.platform == "win32":
     try:
         import win32com.client
@@ -28,11 +27,6 @@ else:
 
 
 def _convert_doc_to_docx_via_libreoffice(doc_path: str) -> str:
-    """
-    Конвертирует .doc в .docx через LibreOffice (без интерфейса).
-    Каждый вызов получает свой изолированный профиль, чтобы избежать
-    зависания из-за файла-замка при параллельных конвертациях.
-    """
     output_dir = tempfile.mkdtemp()
     profile_dir = tempfile.mkdtemp()
     profile_uri = f"file://{profile_dir}"
@@ -59,13 +53,17 @@ def _convert_doc_to_docx_via_libreoffice(doc_path: str) -> str:
 
 
 def _extract_text_from_docx(file_path: str) -> str:
-    """Извлекает текст из DOCX (python-docx)."""
     doc = docx.Document(file_path)
-    return "\n".join(paragraph.text for paragraph in doc.paragraphs)
+    parts = [p.text for p in doc.paragraphs if p.text]
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = " | ".join(cell.text for cell in row.cells)
+            if row_text.strip():
+                parts.append(row_text)
+    return "\n".join(parts)
 
 
 def _extract_text_from_doc_via_com(file_path: str) -> str:
-    """Только для Windows: читает .doc через Microsoft Word COM."""
     if not win32com:
         raise RuntimeError("pywin32 недоступен. .doc не может быть прочитан.")
     word = win32com.client.Dispatch("Word.Application")
@@ -80,7 +78,6 @@ def _extract_text_from_doc_via_com(file_path: str) -> str:
 
 
 def _extract_text_from_pdf(file_path: str) -> str:
-    """Извлекает текст из PDF, пробуя pdfplumber, затем PyPDF2."""
     text = ""
     try:
         with pdfplumber.open(file_path) as pdf:
@@ -105,13 +102,11 @@ def _extract_text_from_pdf(file_path: str) -> str:
 
 
 def _extract_text_from_txt(file_path: str) -> str:
-    """Читает обычный текстовый файл."""
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         return f.read()
 
 
 def _extract_text_from_xlsx(file_path: str) -> str:
-    """Извлекает текст из всех ячеек Excel-файла."""
     wb = openpyxl.load_workbook(file_path, data_only=True)
     all_text = []
     for sheet_name in wb.sheetnames:
@@ -126,15 +121,14 @@ def _extract_text_from_xlsx(file_path: str) -> str:
 
 
 def _ocr_image(file_path: str) -> str:
-    """Распознаёт текст с изображения через Tesseract OCR."""
     img = Image.open(file_path)
     return pytesseract.image_to_string(img, lang="rus+eng")
 
 
-def _extract_texts_from_zip(file_path: str) -> list[dict]:
+def extract_texts_from_zip(file_path: str) -> list[dict]:
     """
-    Распаковывает ZIP-архив во временную папку и рекурсивно извлекает текст
-    из всех поддерживаемых файлов внутри.
+    Распаковывает ZIP и возвращает список {"name": ..., "text": ...}
+    по КАЖДОМУ файлу внутри отдельно (не склеивая в одну простыню).
     """
     results = []
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -145,19 +139,18 @@ def _extract_texts_from_zip(file_path: str) -> list[dict]:
             for fname in files:
                 full_path = os.path.join(root, fname)
                 ext = Path(fname).suffix.lower()
+                if ext == ".zip":
+                    continue
                 try:
                     text = extract_text(full_path, ext)
-                    if text and text.strip():
-                        results.append({"name": fname, "text": text})
+                    results.append({"name": fname, "text": text})
                 except Exception as e:
-                    print(f"Ошибка при обработке файла в архиве {fname}: {e}")
+                    print(f"Ошибка при обработке файла в архиве {fname}: {e}", flush=True)
+                    results.append({"name": fname, "text": ""})
     return results
 
 
 def extract_text(file_path: str, file_ext: str) -> str:
-    """
-    Диспетчер: выбирает нужную функцию извлечения по расширению.
-    """
     ext = file_ext.lower()
     print(f"[extract_text] начинаю обработку {file_path} ({ext})", flush=True)
 
@@ -186,10 +179,8 @@ def extract_text(file_path: str, file_ext: str) -> str:
     elif ext in (".png", ".jpg", ".jpeg"):
         result = _ocr_image(file_path)
     elif ext == ".zip":
-        texts = _extract_texts_from_zip(file_path)
-        combined = []
-        for item in texts:
-            combined.append(f"=== {item['name']} ===\n{item['text']}")
+        items = extract_texts_from_zip(file_path)
+        combined = [f"=== {i['name']} ===\n{i['text']}" for i in items]
         result = "\n\n".join(combined)
     else:
         raise ValueError(f"Неподдерживаемый формат файла: {ext}")
