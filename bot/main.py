@@ -17,7 +17,7 @@ from config.settings import (
     TELEGRAM_TOKEN, TENDER_GROUP_ID, check_settings,
 )
 import bot.database as db
-from bot.parser import extract_text
+from bot.parser import extract_text, extract_texts_from_zip
 from bot.ai_analyzer import analyze_tender_document, merge_analyses
 
 # ---------------------- НАСТРОЙКИ ----------------------
@@ -95,6 +95,52 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
 
         print(f"[process_documents] обрабатываю файл {file_name}", flush=True)
 
+       if file_ext == ".zip":
+            try:
+                zip_items = await asyncio.wait_for(
+                    asyncio.to_thread(extract_texts_from_zip, file_path),
+                    timeout=120,
+                )
+            except asyncio.TimeoutError:
+                print(f"[process_documents] ТАЙМАУТ при распаковке архива {file_name}", flush=True)
+                zip_items = []
+
+            print(f"[process_documents] в архиве {file_name} найдено файлов: {len(zip_items)}", flush=True)
+
+            for item in zip_items:
+                sub_name = f"{file_name}/{item['name']}"
+                sub_text = item["text"]
+                print(f"[process_documents] анализирую {sub_name}, символов: {len(sub_text)}", flush=True)
+
+                sub_analysis = {}
+                if sub_text:
+                    try:
+                        sub_analysis = await asyncio.wait_for(
+                            analyze_tender_document(sub_text), timeout=60
+                        )
+                    except asyncio.TimeoutError:
+                        print(f"[process_documents] ТАЙМАУТ при анализе {sub_name}", flush=True)
+                        sub_analysis = {}
+
+                print(f"[process_documents] {sub_name}: has_useful_data={sub_analysis.get('has_useful_data')}", flush=True)
+
+                try:
+                    await asyncio.wait_for(
+                        db.add_tender_document(
+                            tender_id=tender_id,
+                            file_name=sub_name,
+                            file_path=file_path,
+                            extracted_text=sub_text,
+                            analysis_json=sub_analysis,
+                            is_useful=sub_analysis.get("has_useful_data", False),
+                        ),
+                        timeout=30,
+                    )
+                except asyncio.TimeoutError:
+                    print(f"[process_documents] ТАЙМАУТ при сохранении {sub_name} в БД", flush=True)
+
+            continue
+
         try:
             text = await asyncio.wait_for(
                 asyncio.to_thread(extract_text, file_path, file_ext),
@@ -108,6 +154,35 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
             text = ""
 
         print(f"[process_documents] текст из {file_name} готов, символов: {len(text)}", flush=True)
+
+        analysis = {}
+        if text:
+            try:
+                analysis = await asyncio.wait_for(
+                    analyze_tender_document(text), timeout=60
+                )
+            except asyncio.TimeoutError:
+                print(f"[process_documents] ТАЙМАУТ при анализе {file_name} через YandexGPT", flush=True)
+                analysis = {}
+
+        print(f"[process_documents] анализ {file_name} готов: has_useful_data={analysis.get('has_useful_data')}", flush=True)
+
+        try:
+            await asyncio.wait_for(
+                db.add_tender_document(
+                    tender_id=tender_id,
+                    file_name=file_name,
+                    file_path=file_path,
+                    extracted_text=text,
+                    analysis_json=analysis,
+                    is_useful=analysis.get("has_useful_data", False),
+                ),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            print(f"[process_documents] ТАЙМАУТ при сохранении документа {file_name} в БД", flush=True)
+
+        print(f"[process_documents] документ {file_name} сохранён в БД", flush=True)
 
         analysis = {}
         if text:
