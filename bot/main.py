@@ -19,6 +19,7 @@ from config.settings import (
 import bot.database as db
 from bot.parser import extract_text, extract_texts_from_zip
 from bot.ai_analyzer import analyze_tender_document, merge_analyses
+from bot.supplier_search import search_organizations, try_extract_email
 
 # ---------------------- НАСТРОЙКИ ----------------------
 ALLOWED_EXTENSIONS = {
@@ -292,6 +293,9 @@ async def handle_attachment(message: Message, bot: Bot):
 media_buffers = defaultdict(list)
 media_timers = {}
 
+# Временное хранилище результатов поиска поставщиков (chat_id, thread_id) -> list[dict]
+pending_supplier_results: dict[tuple, list[dict]] = {}
+
 async def flush_media_group(bot: Bot, chat_id: int, thread_id: int, user_id: int):
     buffer_key = (chat_id, thread_id)
     files = media_buffers.pop(buffer_key, [])
@@ -354,8 +358,136 @@ async def cmd_start(message: Message):
     await message.answer(
         "👋 Привет! Я бот для обработки тендеров.\n"
         "Отправьте мне документы (PDF, DOCX, XLSX, ZIP, фото) в эту тему, "
-        "и я извлеку из них ключевые данные и создам сводную карточку."
+        "и я извлеку из них ключевые данные и создам сводную карточку.\n\n"
+        "Когда карточка тендера готова — напишите /поставщики, чтобы найти "
+        "подходящих поставщиков."
     )
+
+
+def _build_supplier_query(tender: dict) -> str:
+    parts = []
+    items = tender.get("items")
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except Exception:
+            items = []
+    if items:
+        parts.append(items[0].get("name", ""))
+    elif tender.get("subject"):
+        parts.append(tender["subject"])
+    elif tender.get("tender_name"):
+        parts.append(tender["tender_name"])
+
+    region = tender.get("region") or ""
+    city = None
+    if "(" in region:
+        city = region.split("(", 1)[1].rstrip(")").split(",")[0].strip()
+    if city:
+        parts.append(city)
+    elif region:
+        parts.append(region)
+
+    return ", ".join(p for p in parts if p)
+
+
+async def cmd_find_suppliers(message: Message):
+    if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
+        return
+
+    chat_id = message.chat.id
+    thread_id = message.message_thread_id
+
+    tender = await db.get_tender_by_thread(str(chat_id), str(thread_id))
+    if not tender or not tender.get("tender_name"):
+        await message.answer(
+            "Ещё не собрана карточка тендера в этой теме — сначала пришлите документы."
+        )
+        return
+
+    query = _build_supplier_query(tender)
+    if not query:
+        await message.answer("Не смог собрать поисковый запрос по данным тендера.")
+        return
+
+    await message.answer(f"Ищу поставщиков по запросу: «{query}»...")
+
+    try:
+        results = await asyncio.wait_for(search_organizations(query), timeout=20)
+    except asyncio.TimeoutError:
+        await message.answer("Поиск занял слишком много времени, попробуйте ещё раз.")
+        return
+
+    if not results:
+        await message.answer(
+            "Ничего не нашлось. Попробуйте другой запрос командой /поставщики_запрос текст"
+        )
+        return
+
+    pending_supplier_results[(chat_id, thread_id)] = results
+
+    lines = ["Нашёл кандидатов — ответьте номерами через запятую, кого сохранить (например: 1,3):", ""]
+    for idx, org in enumerate(results, 1):
+        line = f"{idx}. <b>{org['name']}</b>"
+        if org.get("address"):
+            line += f"\n    {org['address']}"
+        if org.get("phone"):
+            line += f"\n    ☎️ {org['phone']}"
+        if org.get("url"):
+            line += f"\n    🌐 {org['url']}"
+        lines.append(line)
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+async def handle_supplier_selection(message: Message):
+    key = (message.chat.id, message.message_thread_id)
+    if key not in pending_supplier_results:
+        return
+
+    text = (message.text or "").strip()
+    if not text or not all(c.isdigit() or c in ", " for c in text):
+        return
+
+    try:
+        indices = [int(x.strip()) for x in text.split(",") if x.strip()]
+    except ValueError:
+        return
+
+    results = pending_supplier_results[key]
+    tender = await db.get_tender_by_thread(str(message.chat.id), str(message.message_thread_id))
+    categories = [tender.get("classification")] if tender and tender.get("classification") else []
+    city = tender.get("region") if tender else None
+
+    saved = []
+    for idx in indices:
+        if idx < 1 or idx > len(results):
+            continue
+        org = results[idx - 1]
+        try:
+            email = await asyncio.wait_for(try_extract_email(org.get("url")), timeout=20)
+        except asyncio.TimeoutError:
+            email = None
+        supplier_id = await db.add_supplier(
+            name=org.get("name"),
+            phone=org.get("phone"),
+            email=email,
+            city=city,
+            categories=categories,
+            url=org.get("url"),
+        )
+        saved.append((org.get("name"), email, supplier_id))
+
+    del pending_supplier_results[key]
+
+    if not saved:
+        await message.answer("Не удалось сохранить выбранные позиции — проверьте номера.")
+        return
+
+    lines = ["Сохранено:"]
+    for name, email, supplier_id in saved:
+        lines.append(f"— {name} (email: {email or 'не найден'})")
+    await message.answer("\n".join(lines))
 
 
 # ---------------------- ЗАПУСК ----------------------
@@ -371,6 +503,8 @@ async def main():
     dp = Dispatcher()
 
     dp.message.register(cmd_start, Command("start"))
+    dp.message.register(cmd_find_suppliers, Command("поставщики"))
+    dp.message.register(handle_supplier_selection, F.text)
 
     @dp.message(F.document | F.photo, ~F.media_group_id)
     async def single_attachment_handler(message: Message, bot: Bot = bot):
