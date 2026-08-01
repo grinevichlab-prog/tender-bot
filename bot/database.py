@@ -122,7 +122,6 @@ async def init_db():
     async with pool.acquire() as conn:
         await conn.execute(CREATE_TABLES_SQL)
 
-        # Миграция: user_id -> BIGINT
         await conn.execute("""
             DO $$
             BEGIN
@@ -136,7 +135,6 @@ async def init_db():
             $$;
         """)
 
-        # Миграция: chat_id, thread_id -> TEXT
         await conn.execute("""
             DO $$
             BEGIN
@@ -156,9 +154,12 @@ async def init_db():
             $$;
         """)
 
-        # Миграция: добавляем contract_validity, если его ещё нет
         await conn.execute("""
             ALTER TABLE tenders ADD COLUMN IF NOT EXISTS contract_validity TEXT;
+        """)
+
+        await conn.execute("""
+            ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS url TEXT;
         """)
 
         print("Таблицы БД проверены/созданы.")
@@ -274,3 +275,23 @@ async def get_tender_documents(tender_id: int) -> list[dict]:
             tender_id,
         )
         return [dict(r) for r in rows]
+
+
+# ---------------------- ПОСТАВЩИКИ ----------------------
+async def add_supplier(
+    name: str,
+    phone: str | None,
+    email: str | None,
+    city: str | None,
+    categories: list[str],
+    url: str | None,
+) -> int:
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            INSERT INTO suppliers (name, phone, email, city, categories, url)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id
+            """,
+            name, phone, email, city, categories or [], url,
+        )
