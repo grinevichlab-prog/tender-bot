@@ -56,12 +56,17 @@ def build_tender_card(analysis: dict) -> str:
             name = item.get("name", "—")
             qty = item.get("quantity")
             unit = item.get("unit")
-            parts = [f"  {idx}. {name}"]
+            specs = item.get("specs")
+
+            qty_str = ""
             if qty is not None:
-                parts.append(f"— {qty}")
+                qty_str = f" — {qty}"
                 if unit:
-                    parts.append(f" {unit}")
-            lines.append(" ".join(parts))
+                    qty_str += f" {unit}"
+
+            lines.append(f"  <b>{idx}. {name}</b>{qty_str}")
+            if specs:
+                lines.append(f"      <i>{specs}</i>")
         if len(items) > max_items:
             lines.append(f"  ...и ещё {len(items) - max_items} позиций (см. документы)")
 
