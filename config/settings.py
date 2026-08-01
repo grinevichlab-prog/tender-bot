@@ -7,6 +7,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 # --- YandexGPT ---
+YANDEX_MAPS_API_KEY = os.getenv("YANDEX_MAPS_API_KEY")
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID")
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY")
 YANDEX_URL = os.getenv(
