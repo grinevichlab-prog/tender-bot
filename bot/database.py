@@ -3,10 +3,20 @@
 """
 
 import asyncpg
+import re
 from config.settings import DATABASE_URL
 import json
 
 pool = None
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _sanitize_date(value):
+    """Возвращает value только если это валидная дата ГГГГ-ММ-ДД, иначе None."""
+    if not value or not isinstance(value, str) or not _DATE_RE.match(value):
+        return None
+    return value
 
 async def create_pool():
     return await asyncpg.create_pool(DATABASE_URL, statement_cache_size=0)
@@ -209,6 +219,16 @@ async def get_tender_by_thread(chat_id: str, thread_id: str) -> dict | None:
 
 
 async def update_tender_analysis(tender_id: int, analysis: dict):
+    safe_deadline = _sanitize_date(analysis.get("delivery_deadline"))
+    raw_deadline = analysis.get("delivery_deadline")
+    summary = analysis.get("summary")
+
+    # Если срок поставки указан текстом (не конкретной датой), не теряем эту
+    # информацию - добавляем её в описание, раз в поле DATE она не помещается.
+    if raw_deadline and not safe_deadline:
+        note = f"Срок поставки (не является календарной датой): {raw_deadline}."
+        summary = f"{summary} {note}".strip() if summary else note
+
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -230,11 +250,11 @@ async def update_tender_analysis(tender_id: int, analysis: dict):
             analysis.get("subject"),
             json.dumps(analysis.get("items")) if analysis.get("items") else None,
             analysis.get("nmck"),
-            analysis.get("delivery_deadline"),
+            safe_deadline,
             analysis.get("region"),
             analysis.get("purchase_type"),
             analysis.get("classification"),
-            analysis.get("summary"),
+            summary,
             analysis.get("contract_validity"),
         )
 
