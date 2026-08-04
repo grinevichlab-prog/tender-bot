@@ -19,7 +19,7 @@ from config.settings import (
 import bot.database as db
 from bot.parser import extract_text, extract_texts_from_zip
 from bot.ai_analyzer import analyze_tender_document, merge_analyses
-from bot.supplier_search import search_organizations, try_extract_email
+from bot.web_supplier_search import search_suppliers_web
 
 # ---------------------- НАСТРОЙКИ ----------------------
 ALLOWED_EXTENSIONS = {
@@ -262,6 +262,31 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
     except Exception as e:
         print(f"[process_documents] не удалось отправить карточку: {e}", flush=True)
 
+    # Автоматический поиск поставщиков сразу после сборки карточки
+    if merged.get("has_useful_data"):
+        query = _build_supplier_query(merged)
+        if query:
+            print(f"[process_documents] авто-поиск поставщиков: «{query}»", flush=True)
+            try:
+                supplier_results = await asyncio.wait_for(search_suppliers_web(query), timeout=40)
+            except asyncio.TimeoutError:
+                print(f"[process_documents] ТАЙМАУТ авто-поиска поставщиков", flush=True)
+                supplier_results = []
+
+            if supplier_results:
+                pending_supplier_results[(chat_id, thread_id)] = supplier_results
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        message_thread_id=thread_id,
+                        text=_format_supplier_candidates(supplier_results),
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    print(f"[process_documents] не удалось отправить список поставщиков: {e}", flush=True)
+            else:
+                print(f"[process_documents] авто-поиск поставщиков ничего не нашёл", flush=True)
+
 
 async def handle_attachment(message: Message, bot: Bot):
     if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
@@ -383,6 +408,22 @@ def _build_supplier_query(tender: dict) -> str:
     return ", ".join(p for p in parts if p)
 
 
+def _format_supplier_candidates(results: list[dict]) -> str:
+    lines = ["Нашёл кандидатов — ответьте номерами через запятую, кого сохранить (например: 1,3):", ""]
+    for idx, org in enumerate(results, 1):
+        line = f"{idx}. <b>{org['name']}</b>"
+        if org.get("address"):
+            line += f"\n    {org['address']}"
+        if org.get("phone"):
+            line += f"\n    ☎️ {org['phone']}"
+        if org.get("email"):
+            line += f"\n    ✉️ {org['email']}"
+        if org.get("url"):
+            line += f"\n    🌐 {org['url']}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 async def cmd_find_suppliers(message: Message):
     if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
         return
@@ -405,7 +446,7 @@ async def cmd_find_suppliers(message: Message):
     await message.answer(f"Ищу поставщиков по запросу: «{query}»...")
 
     try:
-        results = await asyncio.wait_for(search_organizations(query), timeout=20)
+        results = await asyncio.wait_for(search_suppliers_web(query), timeout=40)
     except asyncio.TimeoutError:
         await message.answer("Поиск занял слишком много времени, попробуйте ещё раз.")
         return
@@ -418,19 +459,7 @@ async def cmd_find_suppliers(message: Message):
         return
 
     pending_supplier_results[(chat_id, thread_id)] = results
-
-    lines = ["Нашёл кандидатов — ответьте номерами через запятую, кого сохранить (например: 1,3):", ""]
-    for idx, org in enumerate(results, 1):
-        line = f"{idx}. <b>{org['name']}</b>"
-        if org.get("address"):
-            line += f"\n    {org['address']}"
-        if org.get("phone"):
-            line += f"\n    ☎️ {org['phone']}"
-        if org.get("url"):
-            line += f"\n    🌐 {org['url']}"
-        lines.append(line)
-
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await message.answer(_format_supplier_candidates(results), parse_mode="HTML")
 
 
 async def cmd_find_suppliers_custom(message: Message):
@@ -449,7 +478,7 @@ async def cmd_find_suppliers_custom(message: Message):
     await message.answer(f"Ищу поставщиков по запросу: «{query_text}»...")
 
     try:
-        results = await asyncio.wait_for(search_organizations(query_text), timeout=20)
+        results = await asyncio.wait_for(search_suppliers_web(query_text), timeout=40)
     except asyncio.TimeoutError:
         await message.answer("Поиск занял слишком много времени, попробуйте ещё раз.")
         return
@@ -459,19 +488,7 @@ async def cmd_find_suppliers_custom(message: Message):
         return
 
     pending_supplier_results[(chat_id, thread_id)] = results
-
-    lines = ["Нашёл кандидатов — ответьте номерами через запятую, кого сохранить (например: 1,3):", ""]
-    for idx, org in enumerate(results, 1):
-        line = f"{idx}. <b>{org['name']}</b>"
-        if org.get("address"):
-            line += f"\n    {org['address']}"
-        if org.get("phone"):
-            line += f"\n    ☎️ {org['phone']}"
-        if org.get("url"):
-            line += f"\n    🌐 {org['url']}"
-        lines.append(line)
-
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await message.answer(_format_supplier_candidates(results), parse_mode="HTML")
 
 
 async def handle_supplier_selection(message: Message):
@@ -498,10 +515,7 @@ async def handle_supplier_selection(message: Message):
         if idx < 1 or idx > len(results):
             continue
         org = results[idx - 1]
-        try:
-            email = await asyncio.wait_for(try_extract_email(org.get("url")), timeout=20)
-        except asyncio.TimeoutError:
-            email = None
+        email = org.get("email")
         supplier_id = await db.add_supplier(
             name=org.get("name"),
             phone=org.get("phone"),
