@@ -1,6 +1,6 @@
 """
 Модуль извлечения текста из файлов разных форматов.
-Поддержка .doc через LibreOffice на Linux.
+Поддержка .doc/.xls через LibreOffice на Linux.
 """
 
 import os
@@ -26,7 +26,12 @@ else:
     win32com = None
 
 
-def _convert_doc_to_docx_via_libreoffice(doc_path: str) -> str:
+def _convert_via_libreoffice(file_path: str, target_ext: str) -> str:
+    """
+    Конвертирует файл (.doc -> docx, .xls -> xlsx) через LibreOffice (headless).
+    Каждый вызов получает свой изолированный профиль, чтобы избежать
+    зависания из-за файла-замка при параллельных конвертациях.
+    """
     output_dir = tempfile.mkdtemp()
     profile_dir = tempfile.mkdtemp()
     profile_uri = f"file://{profile_dir}"
@@ -37,19 +42,19 @@ def _convert_doc_to_docx_via_libreoffice(doc_path: str) -> str:
                 "libreoffice",
                 f"-env:UserInstallation={profile_uri}",
                 "--headless", "--norestore", "--nologo",
-                "--convert-to", "docx",
-                "--outdir", output_dir, doc_path,
+                "--convert-to", target_ext,
+                "--outdir", output_dir, file_path,
             ],
             check=True,
             timeout=60,
         )
     except subprocess.TimeoutExpired as e:
-        raise RuntimeError(f"LibreOffice завис при конвертации {doc_path}: {e}")
+        raise RuntimeError(f"LibreOffice завис при конвертации {file_path}: {e}")
 
     for f in os.listdir(output_dir):
-        if f.endswith(".docx"):
+        if f.endswith(f".{target_ext}"):
             return os.path.join(output_dir, f)
-    raise RuntimeError("Не удалось найти сконвертированный .docx")
+    raise RuntimeError(f"Не удалось найти сконвертированный .{target_ext}")
 
 
 def _extract_text_from_docx(file_path: str) -> str:
@@ -63,18 +68,26 @@ def _extract_text_from_docx(file_path: str) -> str:
     return "\n".join(parts)
 
 
-def _extract_text_from_doc_via_com(file_path: str) -> str:
-    if not win32com:
-        raise RuntimeError("pywin32 недоступен. .doc не может быть прочитан.")
-    word = win32com.client.Dispatch("Word.Application")
-    word.Visible = False
-    try:
-        doc = word.Documents.Open(file_path)
-        text = doc.Content.Text
-        doc.Close()
-        return text
-    finally:
-        word.Quit()
+def _extract_text_from_doc(file_path: str) -> str:
+    if sys.platform == "win32" and win32com:
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False
+        try:
+            doc = word.Documents.Open(file_path)
+            text = doc.Content.Text
+            doc.Close()
+            return text
+        finally:
+            word.Quit()
+    else:
+        docx_path = _convert_via_libreoffice(file_path, "docx")
+        try:
+            return _extract_text_from_docx(docx_path)
+        finally:
+            try:
+                os.remove(docx_path)
+            except Exception:
+                pass
 
 
 def _extract_text_from_pdf(file_path: str) -> str:
@@ -120,16 +133,40 @@ def _extract_text_from_xlsx(file_path: str) -> str:
     return "\n".join(all_text)
 
 
+def _extract_text_from_xls(file_path: str) -> str:
+    if sys.platform == "win32" and win32com:
+        excel = win32com.client.Dispatch("Excel.Application")
+        excel.Visible = False
+        try:
+            wb = excel.Workbooks.Open(file_path)
+            lines = []
+            for sheet in wb.Sheets:
+                used = sheet.UsedRange
+                for row in used.Rows:
+                    values = [str(c.Value) for c in row.Cells if c.Value is not None]
+                    if values:
+                        lines.append(" | ".join(values))
+            wb.Close(False)
+            return "\n".join(lines)
+        finally:
+            excel.Quit()
+    else:
+        xlsx_path = _convert_via_libreoffice(file_path, "xlsx")
+        try:
+            return _extract_text_from_xlsx(xlsx_path)
+        finally:
+            try:
+                os.remove(xlsx_path)
+            except Exception:
+                pass
+
+
 def _ocr_image(file_path: str) -> str:
     img = Image.open(file_path)
     return pytesseract.image_to_string(img, lang="rus+eng")
 
 
 def extract_texts_from_zip(file_path: str) -> list[dict]:
-    """
-    Распаковывает ZIP и возвращает список {"name": ..., "text": ...}
-    по КАЖДОМУ файлу внутри отдельно (не склеивая в одну простыню).
-    """
     results = []
     with tempfile.TemporaryDirectory() as tmpdir:
         with zipfile.ZipFile(file_path, "r") as zf:
@@ -139,14 +176,12 @@ def extract_texts_from_zip(file_path: str) -> list[dict]:
             for fname in files:
                 full_path = os.path.join(root, fname)
                 ext = Path(fname).suffix.lower()
-                if ext == ".zip":
-                    continue
                 try:
                     text = extract_text(full_path, ext)
-                    results.append({"name": fname, "text": text})
+                    if text and text.strip():
+                        results.append({"name": fname, "text": text})
                 except Exception as e:
                     print(f"Ошибка при обработке файла в архиве {fname}: {e}", flush=True)
-                    results.append({"name": fname, "text": ""})
     return results
 
 
@@ -159,21 +194,11 @@ def extract_text(file_path: str, file_ext: str) -> str:
     elif ext == ".docx":
         result = _extract_text_from_docx(file_path)
     elif ext == ".doc":
-        if sys.platform == "win32":
-            result = _extract_text_from_doc_via_com(file_path)
-        else:
-            print(f"[extract_text] конвертирую .doc через LibreOffice: {file_path}", flush=True)
-            docx_path = _convert_doc_to_docx_via_libreoffice(file_path)
-            print(f"[extract_text] конвертация завершена, читаю текст: {docx_path}", flush=True)
-            try:
-                result = _extract_text_from_docx(docx_path)
-            finally:
-                try:
-                    os.remove(docx_path)
-                except Exception:
-                    pass
+        result = _extract_text_from_doc(file_path)
     elif ext in (".xlsx", ".xlsm"):
         result = _extract_text_from_xlsx(file_path)
+    elif ext == ".xls":
+        result = _extract_text_from_xls(file_path)
     elif ext == ".txt":
         result = _extract_text_from_txt(file_path)
     elif ext in (".png", ".jpg", ".jpeg"):
