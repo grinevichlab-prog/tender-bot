@@ -23,7 +23,7 @@ from bot.web_supplier_search import search_suppliers_web
 
 # ---------------------- НАСТРОЙКИ ----------------------
 ALLOWED_EXTENSIONS = {
-    ".pdf", ".docx", ".doc", ".txt", ".xlsx", ".xlsm",
+    ".pdf", ".docx", ".doc", ".txt", ".xlsx", ".xlsm", ".xls",
     ".zip", ".png", ".jpg", ".jpeg",
 }
 
@@ -268,7 +268,7 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
         if query:
             print(f"[process_documents] авто-поиск поставщиков: «{query}»", flush=True)
             try:
-                supplier_results = await asyncio.wait_for(search_suppliers_web(query), timeout=40)
+                supplier_results = await asyncio.wait_for(search_suppliers_web(query), timeout=90)
             except asyncio.TimeoutError:
                 print(f"[process_documents] ТАЙМАУТ авто-поиска поставщиков", flush=True)
                 supplier_results = []
@@ -388,13 +388,21 @@ async def cmd_start(message: Message):
 
 def _build_supplier_query(tender: dict) -> str:
     parts = []
-    classification = tender.get("classification")
-    if classification == "ТОВАР" and tender.get("subject"):
+
+    items = tender.get("items")
+    if isinstance(items, str):
+        try:
+            items = json.loads(items)
+        except Exception:
+            items = []
+
+    if items:
+        names = [i.get("name", "").strip() for i in items if i.get("name")]
+        parts.append(", ".join(names[:3]))
+    elif tender.get("subject"):
         parts.append(tender["subject"][:60])
     elif tender.get("tender_name"):
         parts.append(tender["tender_name"])
-    elif tender.get("subject"):
-        parts.append(tender["subject"][:60])
 
     region = tender.get("region") or ""
     location = None
@@ -446,7 +454,7 @@ async def cmd_find_suppliers(message: Message):
     await message.answer(f"Ищу поставщиков по запросу: «{query}»...")
 
     try:
-        results = await asyncio.wait_for(search_suppliers_web(query), timeout=40)
+        results = await asyncio.wait_for(search_suppliers_web(query), timeout=90)
     except asyncio.TimeoutError:
         await message.answer("Поиск занял слишком много времени, попробуйте ещё раз.")
         return
@@ -478,7 +486,7 @@ async def cmd_find_suppliers_custom(message: Message):
     await message.answer(f"Ищу поставщиков по запросу: «{query_text}»...")
 
     try:
-        results = await asyncio.wait_for(search_suppliers_web(query_text), timeout=40)
+        results = await asyncio.wait_for(search_suppliers_web(query_text), timeout=90)
     except asyncio.TimeoutError:
         await message.answer("Поиск занял слишком много времени, попробуйте ещё раз.")
         return
