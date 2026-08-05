@@ -6,6 +6,7 @@
 
 import re
 import json
+import asyncio
 import aiohttp
 from config.settings import YANDEX_FOLDER_ID, YANDEX_API_KEY, YANDEX_URL
 
@@ -160,16 +161,22 @@ async def search_suppliers_web(query: str, max_results: int = 6) -> list[dict]:
     candidates = await _ai_filter_candidates(query, candidates)
     candidates = candidates[:max_results]
 
-    results = []
     async with aiohttp.ClientSession() as session:
-        for c in candidates:
-            contacts = await _extract_contacts(session, c["url"])
-            results.append({
-                "name": c["name"],
-                "url": c["url"],
-                "email": contacts["email"],
-                "phone": contacts["phone"],
-                "address": None,
-                "categories": [],
-            })
+        contacts_list = await asyncio.gather(
+            *[_extract_contacts(session, c["url"]) for c in candidates],
+            return_exceptions=True,
+        )
+
+    results = []
+    for c, contacts in zip(candidates, contacts_list):
+        if isinstance(contacts, Exception):
+            contacts = {"email": None, "phone": None}
+        results.append({
+            "name": c["name"],
+            "url": c["url"],
+            "email": contacts["email"],
+            "phone": contacts["phone"],
+            "address": None,
+            "categories": [],
+        })
     return results
