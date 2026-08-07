@@ -89,11 +89,40 @@ CREATE TABLE IF NOT EXISTS tenders (
     items JSONB,
     contract_validity TEXT,
     delivery_period JSONB,
-    contract_validity_details JSONB,
     penalties JSONB,
-    analysis_conflicts JSONB,
-    source_evidence JSONB,
     UNIQUE(chat_id, thread_id)
+);
+
+CREATE TABLE IF NOT EXISTS tender_items (
+    id SERIAL PRIMARY KEY,
+    tender_id INTEGER REFERENCES tenders(id) ON DELETE CASCADE,
+    position_number INTEGER,
+    name TEXT NOT NULL,
+    quantity NUMERIC,
+    unit TEXT,
+    requirements JSONB,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(tender_id, position_number)
+);
+
+CREATE TABLE IF NOT EXISTS product_models (
+    id SERIAL PRIMARY KEY,
+    tender_item_id INTEGER REFERENCES tender_items(id) ON DELETE CASCADE,
+    manufacturer TEXT,
+    model TEXT NOT NULL,
+    product_name TEXT,
+    source_url TEXT,
+    source_title TEXT,
+    specifications JSONB,
+    price NUMERIC,
+    currency TEXT,
+    price_includes_vat BOOLEAN,
+    availability TEXT,
+    match_status TEXT,
+    match_result JSONB,
+    selected BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(tender_item_id, model, source_url)
 );
 
 CREATE TABLE IF NOT EXISTS supplier_deals (
@@ -128,53 +157,6 @@ CREATE TABLE IF NOT EXISTS tender_documents (
     extracted_text TEXT,
     analysis_json JSONB,
     is_useful BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS tender_items (
-    id SERIAL PRIMARY KEY,
-    tender_id INTEGER NOT NULL REFERENCES tenders(id) ON DELETE CASCADE,
-    position_number INTEGER,
-    name TEXT NOT NULL,
-    quantity NUMERIC,
-    unit TEXT,
-    requirements JSONB NOT NULL DEFAULT '[]'::jsonb,
-    quantity_conflicts JSONB NOT NULL DEFAULT '[]'::jsonb,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS tender_requirements (
-    id SERIAL PRIMARY KEY,
-    tender_item_id INTEGER NOT NULL REFERENCES tender_items(id) ON DELETE CASCADE,
-    parameter TEXT NOT NULL,
-    operator TEXT NOT NULL,
-    value JSONB,
-    min_value NUMERIC,
-    max_value NUMERIC,
-    unit TEXT,
-    mandatory BOOLEAN DEFAULT TRUE,
-    raw_text TEXT,
-    source_document TEXT,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS requirement_conflicts (
-    id SERIAL PRIMARY KEY,
-    tender_id INTEGER NOT NULL REFERENCES tenders(id) ON DELETE CASCADE,
-    field TEXT NOT NULL,
-    conflict_type TEXT NOT NULL,
-    values_json JSONB NOT NULL,
-    status TEXT NOT NULL DEFAULT 'OPEN',
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS source_evidence (
-    id SERIAL PRIMARY KEY,
-    tender_id INTEGER NOT NULL REFERENCES tenders(id) ON DELETE CASCADE,
-    field TEXT NOT NULL,
-    item_index INTEGER,
-    source_document TEXT,
-    source_text TEXT,
     created_at TIMESTAMP DEFAULT NOW()
 );
 """
@@ -219,10 +201,7 @@ async def init_db():
         await conn.execute("""
             ALTER TABLE tenders ADD COLUMN IF NOT EXISTS contract_validity TEXT;
             ALTER TABLE tenders ADD COLUMN IF NOT EXISTS delivery_period JSONB;
-            ALTER TABLE tenders ADD COLUMN IF NOT EXISTS contract_validity_details JSONB;
             ALTER TABLE tenders ADD COLUMN IF NOT EXISTS penalties JSONB;
-            ALTER TABLE tenders ADD COLUMN IF NOT EXISTS analysis_conflicts JSONB;
-            ALTER TABLE tenders ADD COLUMN IF NOT EXISTS source_evidence JSONB;
         """)
 
         await conn.execute("""
@@ -277,113 +256,47 @@ async def get_tender_by_thread(chat_id: str, thread_id: str) -> dict | None:
 
 async def update_tender_analysis(tender_id: int, analysis: dict):
     safe_deadline = _sanitize_date(analysis.get("delivery_deadline"))
+    raw_deadline = analysis.get("delivery_deadline")
+    summary = analysis.get("summary")
+
+    # Если срок поставки указан текстом (не конкретной датой), не теряем эту
+    # информацию - добавляем её в описание, раз в поле DATE она не помещается.
+    if raw_deadline and not safe_deadline:
+        note = f"Срок поставки (не является календарной датой): {raw_deadline}."
+        summary = f"{summary} {note}".strip() if summary else note
 
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                """
-                UPDATE tenders SET
-                    tender_name = $2,
-                    subject = $3,
-                    items = $4::jsonb,
-                    nmck = $5,
-                    delivery_deadline = $6::DATE,
-                    region = $7,
-                    purchase_type = $8,
-                    classification = $9,
-                    summary = $10,
-                    contract_validity = $11,
-                    delivery_period = $12::jsonb,
-                    contract_validity_details = $13::jsonb,
-                    penalties = $14::jsonb,
-                    analysis_conflicts = $15::jsonb,
-                    source_evidence = $16::jsonb,
-                    updated_at = NOW()
-                WHERE id = $1
-                """,
-                tender_id,
-                analysis.get("tender_name"),
-                analysis.get("subject"),
-                json.dumps(analysis.get("items") or [], ensure_ascii=False),
-                analysis.get("nmck"),
-                safe_deadline,
-                analysis.get("region"),
-                analysis.get("purchase_type"),
-                analysis.get("classification"),
-                analysis.get("summary"),
-                analysis.get("contract_validity"),
-                json.dumps(analysis.get("delivery_period"), ensure_ascii=False) if analysis.get("delivery_period") else None,
-                json.dumps(analysis.get("contract_validity_details"), ensure_ascii=False) if analysis.get("contract_validity_details") else None,
-                json.dumps(analysis.get("penalties") or [], ensure_ascii=False),
-                json.dumps(analysis.get("conflicts") or [], ensure_ascii=False),
-                json.dumps(analysis.get("source_evidence") or [], ensure_ascii=False),
-            )
-
-            await conn.execute("DELETE FROM tender_items WHERE tender_id = $1", tender_id)
-            await conn.execute("DELETE FROM requirement_conflicts WHERE tender_id = $1", tender_id)
-            await conn.execute("DELETE FROM source_evidence WHERE tender_id = $1", tender_id)
-
-            for position_number, item in enumerate(analysis.get("items") or [], 1):
-                item_id = await conn.fetchval(
-                    """
-                    INSERT INTO tender_items
-                        (tender_id, position_number, name, quantity, unit, requirements, quantity_conflicts)
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
-                    RETURNING id
-                    """,
-                    tender_id, position_number, item.get("name"), item.get("quantity"),
-                    item.get("unit"),
-                    json.dumps(item.get("requirements") or [], ensure_ascii=False),
-                    json.dumps(item.get("quantity_conflicts") or [], ensure_ascii=False),
-                )
-
-                for req in item.get("requirements") or []:
-                    if not isinstance(req, dict) or not req.get("parameter"):
-                        continue
-                    value = req.get("value")
-                    min_value = req.get("min")
-                    max_value = req.get("max")
-                    await conn.execute(
-                        """
-                        INSERT INTO tender_requirements
-                            (tender_item_id, parameter, operator, value, min_value, max_value, unit, mandatory, raw_text, source_document)
-                        VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)
-                        """,
-                        item_id, req.get("parameter"), req.get("operator") or "TEXT",
-                        json.dumps(value, ensure_ascii=False) if value is not None else None,
-                        min_value, max_value, req.get("unit"),
-                        bool(req.get("mandatory", True)), req.get("raw_text"),
-                        req.get("source_document"),
-                    )
-
-            for conflict in analysis.get("conflicts") or []:
-                if not isinstance(conflict, dict):
-                    continue
-                await conn.execute(
-                    """
-                    INSERT INTO requirement_conflicts
-                        (tender_id, field, conflict_type, values_json, status)
-                    VALUES ($1, $2, $3, $4::jsonb, $5)
-                    """,
-                    tender_id, conflict.get("field") or "unknown",
-                    conflict.get("type") or "UNKNOWN",
-                    json.dumps(conflict.get("values") or [], ensure_ascii=False),
-                    conflict.get("status") or "OPEN",
-                )
-
-            for evidence in analysis.get("source_evidence") or []:
-                if not isinstance(evidence, dict):
-                    continue
-                await conn.execute(
-                    """
-                    INSERT INTO source_evidence
-                        (tender_id, field, item_index, source_document, source_text)
-                    VALUES ($1, $2, $3, $4, $5)
-                    """,
-                    tender_id, evidence.get("field") or "unknown",
-                    evidence.get("item_index"), evidence.get("source_document"),
-                    evidence.get("raw_text"),
-                )
+        await conn.execute(
+            """
+            UPDATE tenders SET
+                tender_name = $2,
+                subject = $3,
+                items = $4::jsonb,
+                nmck = $5,
+                delivery_deadline = CASE WHEN $6::TEXT IS NOT NULL THEN $6::DATE ELSE delivery_deadline END,
+                region = $7,
+                purchase_type = $8,
+                classification = $9,
+                summary = $10,
+                contract_validity = $11,
+                delivery_period = $12::jsonb,
+                penalties = $13::jsonb
+            WHERE id = $1
+            """,
+            tender_id,
+            analysis.get("tender_name"),
+            analysis.get("subject"),
+            json.dumps(analysis.get("items")) if analysis.get("items") else None,
+            analysis.get("nmck"),
+            safe_deadline,
+            analysis.get("region"),
+            analysis.get("purchase_type"),
+            analysis.get("classification"),
+            summary,
+            analysis.get("contract_validity"),
+            json.dumps(analysis.get("delivery_period"), ensure_ascii=False) if analysis.get("delivery_period") else None,
+            json.dumps(analysis.get("penalties") or [], ensure_ascii=False),
+        )
 
 
 async def set_summary_message_id(tender_id: int, message_id: int):
@@ -424,6 +337,109 @@ async def get_tender_documents(tender_id: int) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+
+# ---------------------- ПОЗИЦИИ И МОДЕЛИ ----------------------
+async def sync_tender_items(tender_id: int, items: list[dict]) -> list[int]:
+    """Синхронизирует позиции тендера с таблицей tender_items и возвращает их id."""
+    ids = []
+    async with pool.acquire() as conn:
+        for position, item in enumerate(items or [], 1):
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            row = await conn.fetchrow(
+                """
+                INSERT INTO tender_items (tender_id, position_number, name, quantity, unit, requirements)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                ON CONFLICT (tender_id, position_number) DO UPDATE SET
+                    name=EXCLUDED.name, quantity=EXCLUDED.quantity, unit=EXCLUDED.unit, requirements=EXCLUDED.requirements
+                RETURNING id
+                """,
+                tender_id, position, name, item.get("quantity"), item.get("unit"),
+                json.dumps(item.get("requirements") or []),
+            )
+            ids.append(row["id"])
+    return ids
+
+
+async def get_tender_items(tender_id: int) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM tender_items WHERE tender_id = $1 ORDER BY position_number, id",
+            tender_id,
+        )
+        result = []
+        for row in rows:
+            item = dict(row)
+            if isinstance(item.get("requirements"), str):
+                try:
+                    item["requirements"] = json.loads(item["requirements"])
+                except Exception:
+                    item["requirements"] = []
+            result.append(item)
+        return result
+
+
+async def save_product_model(tender_item_id: int, model: dict) -> int:
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """
+            INSERT INTO product_models
+                (tender_item_id, manufacturer, model, product_name, source_url,
+                 source_title, specifications, price, currency, price_includes_vat,
+                 availability, match_status, match_result)
+            VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12,$13::jsonb)
+            ON CONFLICT (tender_item_id, model, source_url)
+            DO UPDATE SET
+                manufacturer=EXCLUDED.manufacturer,
+                product_name=EXCLUDED.product_name,
+                source_title=EXCLUDED.source_title,
+                specifications=EXCLUDED.specifications,
+                price=EXCLUDED.price,
+                currency=EXCLUDED.currency,
+                price_includes_vat=EXCLUDED.price_includes_vat,
+                availability=EXCLUDED.availability,
+                match_status=EXCLUDED.match_status,
+                match_result=EXCLUDED.match_result
+            RETURNING id
+            """,
+            tender_item_id,
+            model.get("manufacturer"),
+            model.get("model"),
+            model.get("product_name"),
+            model.get("source_url"),
+            model.get("source_title"),
+            json.dumps(model.get("specifications") or {}),
+            model.get("price"),
+            model.get("currency"),
+            model.get("price_includes_vat"),
+            model.get("availability"),
+            model.get("match_status"),
+            json.dumps(model.get("match_result") or {}),
+        )
+
+
+async def get_product_models(tender_item_id: int) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM product_models WHERE tender_item_id=$1 ORDER BY id",
+            tender_item_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def select_product_model(model_id: int, tender_item_id: int) -> None:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE product_models SET selected=FALSE WHERE tender_item_id=$1",
+                tender_item_id,
+            )
+            await conn.execute(
+                "UPDATE product_models SET selected=TRUE WHERE id=$1 AND tender_item_id=$2",
+                model_id, tender_item_id,
+            )
+
 # ---------------------- ПОСТАВЩИКИ ----------------------
 async def add_supplier(
     name: str,
@@ -441,4 +457,3 @@ async def add_supplier(
             RETURNING id
             """,
             name, phone, email, city, categories or [], url,
-        )
