@@ -12,6 +12,7 @@
 - конфликты между документами.
 """
 
+import asyncio
 import json
 import re
 
