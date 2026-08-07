@@ -1,35 +1,57 @@
-r"""
-Главный модуль Telegram-бота для обработки тендеров.
-Запуск: py -m bot.main
-Требуется заполненный .env (TELEGRAM_TOKEN, YANDEX_API_KEY, DATABASE_URL, ...)
-"""
+r"""Главный модуль Telegram-бота для обработки тендеров."""
+
+from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from config.settings import (
-    TELEGRAM_TOKEN, TENDER_GROUP_ID, check_settings,
-)
+from config.settings import TELEGRAM_TOKEN, TENDER_GROUP_ID, check_settings
 import bot.database as db
 from bot.parser import extract_text, extract_texts_from_zip
 from bot.ai_analyzer import analyze_tender_document, merge_analyses
+from bot.model_search import search_models
+from bot.model_matcher import match_model
 from bot.web_supplier_search import search_suppliers_web
 
-# ---------------------- НАСТРОЙКИ ----------------------
-ALLOWED_EXTENSIONS = {
-    ".pdf", ".docx", ".doc", ".txt", ".xlsx", ".xlsm", ".xls",
-    ".zip", ".png", ".jpg", ".jpeg",
-}
-
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".xlsx", ".xlsm", ".xls", ".zip", ".png", ".jpg", ".jpeg"}
 MEDIA_GROUP_DELAY = 2.0
 
-# ---------------------- КАРТОЧКА ТЕНДЕРА ----------------------
+media_buffers = defaultdict(list)
+media_timers = {}
+pending_supplier_results: dict[tuple, list[dict]] = {}
+
+
+def _as_list(value):
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return []
+    return value if isinstance(value, list) else []
+
+
+def _format_delivery_period(period: dict | None) -> str | None:
+    if not period:
+        return None
+    raw = period.get("raw_text")
+    if raw:
+        return str(raw)
+    value = period.get("value")
+    unit = period.get("unit")
+    date = period.get("date")
+    if date:
+        return str(date)
+    if value is not None and unit:
+        return f"{value} {unit}"
+    return None
+
+
 def build_tender_card(analysis: dict) -> str:
     lines = []
     if analysis.get("tender_name"):
@@ -37,29 +59,23 @@ def build_tender_card(analysis: dict) -> str:
     if analysis.get("subject"):
         lines.append(f"📋 Предмет: {analysis['subject']}")
     if analysis.get("nmck") is not None:
-        try:
-            nmck = float(analysis["nmck"])
-            lines.append(f"💰 НМЦК: {nmck:,.2f} руб.".replace(",", " "))
-        except (TypeError, ValueError):
-            lines.append(f"💰 НМЦК: {analysis['nmck']} руб.")
+        lines.append(f"💰 НМЦК: {analysis['nmck']:,.2f} руб.")
+    elif analysis.get("nmck_conflicts"):
+        values = ", ".join(f"{v:,.2f}" for v in analysis["nmck_conflicts"])
+        lines.append(f"⚠️ НМЦК: конфликт значений ({values} руб.)")
+    period = analysis.get("delivery_period")
+    if period:
+        lines.append(f"🚚 Срок поставки: {_format_delivery_period(period)}")
+    elif analysis.get("delivery_period_conflicts"):
+        variants = "; ".join(str(x.get("raw_text")) for x in analysis["delivery_period_conflicts"] if x.get("raw_text"))
+        lines.append(f"⚠️ Срок поставки: конфликт ({variants})")
     if analysis.get("contract_validity"):
-        lines.append(f"📄 Срок действия контракта: {analysis['contract_validity']}")
-
-    delivery_period = analysis.get("delivery_period") or {}
-    if isinstance(delivery_period, dict) and delivery_period.get("raw_text"):
-        lines.append(f"🚚 Срок поставки: {delivery_period['raw_text']}")
-    elif analysis.get("delivery_deadline"):
-        lines.append(f"🚚 Срок поставки: {analysis['delivery_deadline']}")
-
+        lines.append(f"📄 Срок действия договора: {analysis['contract_validity']}")
     penalties = analysis.get("penalties") or []
     if penalties:
-        lines.append("⚠️ Штрафы / неустойка:")
-        for penalty in penalties[:5]:
-            if isinstance(penalty, dict) and penalty.get("raw_text"):
-                lines.append(f"  • {penalty['raw_text']}")
-            else:
-                lines.append(f"  • {penalty}")
-
+        lines.append("⚠️ Ответственность:")
+        for p in penalties[:5]:
+            lines.append(f"  • {p.get('raw_text') or p.get('type') or 'условие'}")
     if analysis.get("region"):
         lines.append(f"📍 Регион: {analysis['region']}")
     if analysis.get("purchase_type"):
@@ -67,390 +83,274 @@ def build_tender_card(analysis: dict) -> str:
     if analysis.get("classification"):
         lines.append(f"📦 Категория: {analysis['classification']}")
 
-    conflicts = analysis.get("conflicts") or []
-    if conflicts:
-        lines.append(f"⚠️ Конфликты в документации: {len(conflicts)} — требуют проверки")
-
-    items = analysis.get("items") or []
+    items = _as_list(analysis.get("items"))
     if items:
-        max_items = 25
         lines.append("🛒 Позиции:")
-        for idx, item in enumerate(items[:max_items], 1):
+        for idx, item in enumerate(items[:25], 1):
             name = item.get("name", "—")
             qty = item.get("quantity")
             unit = item.get("unit")
-            requirements = item.get("requirements") or []
-
-            qty_str = ""
-            if qty is not None:
-                qty_str = f" — {qty}"
-                if unit:
-                    qty_str += f" {unit}"
-
+            qty_str = f" — {qty} {unit or ''}" if qty is not None else ""
             lines.append(f"  <b>{idx}. {name}</b>{qty_str}")
-            if requirements:
-                req_text = "; ".join(
-                    str(r.get("raw_text") or r.get("parameter") or "")
-                    for r in requirements[:4] if isinstance(r, dict)
-                )
-                if req_text:
-                    lines.append(f"      <i>{req_text}</i>")
-        if len(items) > max_items:
-            lines.append(f"  ...и ещё {len(items) - max_items} позиций (см. документы)")
+            reqs = item.get("requirements") or []
+            if reqs:
+                lines.append(f"      требований: {len(reqs)}")
 
     if analysis.get("summary"):
-        summary = analysis["summary"]
-        if len(summary) > 800:
-            summary = summary[:800] + "…"
-        lines.append(f"\n📝 {summary}")
+        summary = str(analysis["summary"])
+        lines.append(f"\n📝 {summary[:800]}{'…' if len(summary) > 800 else ''}")
 
     text = "\n".join(lines) if lines else "Нет данных."
-    max_len = 3800
-    if len(text) > max_len:
-        text = text[:max_len] + "\n\n…(текст обрезан, полные данные в исходных файлах)"
-    return text
+    return text[:3800] + ("\n\n…(текст обрезан)" if len(text) > 3800 else "")
 
 
-# ---------------------- ОБРАБОТЧИКИ ----------------------
+def models_keyboard(items: list[dict]) -> InlineKeyboardMarkup | None:
+    if not items:
+        return None
+    rows = []
+    for item in items[:20]:
+        rows.append([InlineKeyboardButton(
+            text=f"🔎 {item['position_number']}. {item['name'][:45]}",
+            callback_data=f"model_item:{item['id']}",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def model_results_keyboard(models: list[dict], item_id: int) -> InlineKeyboardMarkup | None:
+    if not models:
+        return None
+    rows = []
+    for model in models[:12]:
+        status = model.get("match_status") or "UNKNOWN"
+        icon = {"MATCH": "✅", "NEEDS_CLARIFICATION": "⚠️", "UNKNOWN": "❓", "REJECTED": "❌"}.get(status, "❓")
+        label = f"{icon} {model.get('model', 'без модели')[:45]}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"model_select:{item_id}:{model['id']}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 async def process_documents(bot: Bot, message: Message, files: list[dict]):
     chat_id = message.chat.id
     thread_id = message.message_thread_id
-    telegram_user_id = message.from_user.id
-
-    internal_user_id = await db.get_or_create_user(telegram_user_id, message.from_user.full_name)
-
+    internal_user_id = await db.get_or_create_user(message.from_user.id, message.from_user.full_name)
     tender_id = await db.create_tender_for_thread(str(chat_id), str(thread_id), internal_user_id)
 
     for file_info in files:
-        file_path = file_info["path"]
-        file_name = file_info["name"]
+        file_path, file_name = file_info["path"], file_info["name"]
         file_ext = Path(file_name).suffix.lower()
-
-        print(f"[process_documents] обрабатываю файл {file_name}", flush=True)
+        print(f"[process_documents] обрабатываю {file_name}", flush=True)
 
         if file_ext == ".zip":
             try:
-                zip_items = await asyncio.wait_for(
-                    asyncio.to_thread(extract_texts_from_zip, file_path),
-                    timeout=120,
-                )
-            except asyncio.TimeoutError:
-                print(f"[process_documents] ТАЙМАУТ при распаковке архива {file_name}", flush=True)
+                zip_items = await asyncio.wait_for(asyncio.to_thread(extract_texts_from_zip, file_path), timeout=120)
+            except Exception as exc:
+                print(f"[process_documents] ZIP error: {exc}", flush=True)
                 zip_items = []
-
-            print(f"[process_documents] в архиве {file_name} найдено файлов: {len(zip_items)}", flush=True)
-
             for item in zip_items:
-                sub_name = f"{file_name}/{item['name']}"
-                sub_text = item["text"]
-                print(f"[process_documents] анализирую {sub_name}, символов: {len(sub_text)}", flush=True)
-
-                sub_analysis = {}
-                if sub_text:
-                    try:
-                        sub_analysis = await asyncio.wait_for(
-                            analyze_tender_document(sub_text), timeout=60
-                        )
-                    except asyncio.TimeoutError:
-                        print(f"[process_documents] ТАЙМАУТ при анализе {sub_name}", flush=True)
-                        sub_analysis = {}
-
-                print(f"[process_documents] {sub_name}: has_useful_data={sub_analysis.get('has_useful_data')}", flush=True)
-                if isinstance(sub_analysis, dict):
-                    for evidence in sub_analysis.get("source_evidence") or []:
-                        if isinstance(evidence, dict):
-                            evidence.setdefault("source_document", sub_name)
-                    for item in sub_analysis.get("items") or []:
-                        if isinstance(item, dict):
-                            item.setdefault("source_document", sub_name)
-                            for requirement in item.get("requirements") or []:
-                                if isinstance(requirement, dict):
-                                    requirement.setdefault("source_document", sub_name)
-
-                try:
-                    await asyncio.wait_for(
-                        db.add_tender_document(
-                            tender_id=tender_id,
-                            file_name=sub_name,
-                            file_path=file_path,
-                            extracted_text=sub_text,
-                            analysis_json=sub_analysis,
-                            is_useful=sub_analysis.get("has_useful_data", False),
-                        ),
-                        timeout=30,
-                    )
-                except asyncio.TimeoutError:
-                    print(f"[process_documents] ТАЙМАУТ при сохранении {sub_name} в БД", flush=True)
-
+                sub_name, sub_text = f"{file_name}/{item['name']}", item.get("text", "")
+                analysis = await analyze_tender_document(sub_text) if sub_text else {}
+                await db.add_tender_document(tender_id, sub_name, file_path, sub_text, analysis, analysis.get("has_useful_data", False))
             continue
 
         try:
-            text = await asyncio.wait_for(
-                asyncio.to_thread(extract_text, file_path, file_ext),
-                timeout=90,
-            )
-        except asyncio.TimeoutError:
-            print(f"[process_documents] ТАЙМАУТ при извлечении текста из {file_name} (90 сек)", flush=True)
+            text = await asyncio.wait_for(asyncio.to_thread(extract_text, file_path, file_ext), timeout=90)
+        except Exception as exc:
+            print(f"[process_documents] extraction error: {exc}", flush=True)
             text = ""
-        except Exception as e:
-            print(f"[process_documents] Не удалось извлечь текст из {file_name}: {e}", flush=True)
-            text = ""
+        analysis = await analyze_tender_document(text) if text else {}
+        await db.add_tender_document(tender_id, file_name, file_path, text, analysis, analysis.get("has_useful_data", False))
 
-        print(f"[process_documents] текст из {file_name} готов, символов: {len(text)}", flush=True)
-
-        analysis = {}
-        if text:
-            try:
-                analysis = await asyncio.wait_for(
-                    analyze_tender_document(text), timeout=60
-                )
-            except asyncio.TimeoutError:
-                print(f"[process_documents] ТАЙМАУТ при анализе {file_name} через YandexGPT", flush=True)
-                analysis = {}
-
-        print(f"[process_documents] анализ {file_name} готов: has_useful_data={analysis.get('has_useful_data')}", flush=True)
-        if isinstance(analysis, dict):
-            for evidence in analysis.get("source_evidence") or []:
-                if isinstance(evidence, dict):
-                    evidence.setdefault("source_document", file_name)
-            for item in analysis.get("items") or []:
-                if isinstance(item, dict):
-                    item.setdefault("source_document", file_name)
-                    for requirement in item.get("requirements") or []:
-                        if isinstance(requirement, dict):
-                            requirement.setdefault("source_document", file_name)
-
-        try:
-            await asyncio.wait_for(
-                db.add_tender_document(
-                    tender_id=tender_id,
-                    file_name=file_name,
-                    file_path=file_path,
-                    extracted_text=text,
-                    analysis_json=analysis,
-                    is_useful=analysis.get("has_useful_data", False),
-                ),
-                timeout=30,
-            )
-        except asyncio.TimeoutError:
-            print(f"[process_documents] ТАЙМАУТ при сохранении документа {file_name} в БД", flush=True)
-
-        print(f"[process_documents] документ {file_name} сохранён в БД", flush=True)
-
-    print(f"[process_documents] все файлы обработаны, собираю карточку", flush=True)
-
-    try:
-        all_docs = await asyncio.wait_for(db.get_tender_documents(tender_id), timeout=30)
-    except asyncio.TimeoutError:
-        print(f"[process_documents] ТАЙМАУТ при чтении документов тендера из БД", flush=True)
-        all_docs = []
-
-    print(f"[process_documents] получено документов из БД: {len(all_docs)}", flush=True)
-
-    all_analyses = []
+    all_docs = await db.get_tender_documents(tender_id)
+    analyses = []
     for doc in all_docs:
         raw = doc.get("analysis_json")
-        if not raw:
-            continue
-        parsed = json.loads(raw) if isinstance(raw, str) else raw
-        all_analyses.append(parsed)
+        if raw:
+            analyses.append(json.loads(raw) if isinstance(raw, str) else raw)
 
-    merged = merge_analyses(all_analyses)
-    print(f"[process_documents] merge_analyses готов", flush=True)
-
-    try:
-        await asyncio.wait_for(db.update_tender_analysis(tender_id, merged), timeout=30)
-    except asyncio.TimeoutError:
-        print(f"[process_documents] ТАЙМАУТ при записи анализа тендера в БД", flush=True)
-
-    print(f"[process_documents] update_tender_analysis готов", flush=True)
+    merged = merge_analyses(analyses)
+    await db.update_tender_analysis(tender_id, merged)
+    await db.sync_tender_items(tender_id, merged.get("items") or [])
 
     card_text = build_tender_card(merged)
-    print(f"[process_documents] размер карточки: {len(card_text)} символов", flush=True)
-
-    try:
-        tender = await asyncio.wait_for(
-            db.get_tender_by_thread(str(chat_id), str(thread_id)), timeout=30
-        )
-    except asyncio.TimeoutError:
-        print(f"[process_documents] ТАЙМАУТ при чтении тендера по теме из БД", flush=True)
-        tender = None
-
+    tender = await db.get_tender_by_thread(str(chat_id), str(thread_id))
     old_message_id = tender.get("summary_message_id") if tender else None
-    print(f"[process_documents] старая карточка: summary_message_id={old_message_id}", flush=True)
-
     if old_message_id:
         try:
-            await asyncio.wait_for(
-                bot.delete_message(chat_id=chat_id, message_id=old_message_id),
-                timeout=15,
-            )
-            print(f"[process_documents] старая карточка удалена", flush=True)
-        except asyncio.TimeoutError:
-            print(f"[process_documents] ТАЙМАУТ при удалении старой карточки", flush=True)
-        except Exception as e:
-            print(f"[process_documents] не удалось удалить старую карточку (возможно уже удалена): {e}", flush=True)
+            await bot.delete_message(chat_id=chat_id, message_id=old_message_id)
+        except Exception:
+            pass
 
-    try:
-        print(f"[process_documents] отправляю новую карточку...", flush=True)
-        sent_msg = await asyncio.wait_for(
-            bot.send_message(
-                chat_id=chat_id,
-                message_thread_id=thread_id,
-                text=card_text,
-                parse_mode="HTML",
-            ),
-            timeout=20,
+    sent = await bot.send_message(chat_id=chat_id, message_thread_id=thread_id, text=card_text, parse_mode="HTML")
+    await db.set_summary_message_id(tender_id, sent.message_id)
+
+    items = await db.get_tender_items(tender_id)
+    keyboard = models_keyboard(items)
+    if keyboard:
+        await bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id,
+            text="После анализа выберите позицию, для которой нужно найти конкретные модели: ",
+            reply_markup=keyboard,
         )
-        await db.set_summary_message_id(tender_id, sent_msg.message_id)
-        print(f"[process_documents] новая карточка отправлена, message_id={sent_msg.message_id}", flush=True)
-    except Exception as e:
-        print(f"[process_documents] не удалось отправить карточку: {e}", flush=True)
-
-    # Поиск поставщиков больше не запускается автоматически.
-    # На следующем этапе он будет запускаться только после выбора модели/позиции.
 
 
 async def handle_attachment(message: Message, bot: Bot):
     if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
         return
-
-    if message.document:
-        file = message.document
-    elif message.photo:
-        file = message.photo[-1]
-    else:
+    file = message.document if message.document else (message.photo[-1] if message.photo else None)
+    if not file:
         return
+    temp_dir = Path("data/uploads")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    tg_file = await bot.get_file(file.file_id)
+    dest = temp_dir / (file.file_name if message.document else f"{file.file_id}.jpg")
+    await bot.download_file(tg_file.file_path, destination=dest)
+    await process_documents(bot, message, [{"name": dest.name, "path": str(dest)}])
 
-    TEMP_DIR = Path("data/uploads")
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
-
-    file_info = await bot.get_file(file.file_id)
-    dest_path = TEMP_DIR / file.file_name if message.document else TEMP_DIR / f"{file.file_id}.jpg"
-    await bot.download_file(file_info.file_path, destination=dest_path)
-
-    await process_documents(
-        bot=bot,
-        message=message,
-        files=[{"name": dest_path.name, "path": str(dest_path)}],
-    )
-
-
-media_buffers = defaultdict(list)
-media_timers = {}
-
-pending_supplier_results: dict[tuple, list[dict]] = {}
 
 async def flush_media_group(bot: Bot, chat_id: int, thread_id: int, user_id: int):
-    buffer_key = (chat_id, thread_id)
-    files = media_buffers.pop(buffer_key, [])
+    key = (chat_id, thread_id)
+    files = media_buffers.pop(key, [])
+    media_timers.pop(key, None)
     if not files:
         return
-
-    class FakeMessage:
-        pass
-    fake_msg = FakeMessage()
-    fake_msg.chat = type("obj", (object,), {"id": chat_id})
-    fake_msg.message_thread_id = thread_id
-    fake_msg.from_user = type("obj", (object,), {"id": user_id, "full_name": ""})
-
-    await process_documents(bot=bot, message=fake_msg, files=files)
-
-    timer = media_timers.pop(buffer_key, None)
-    if timer:
-        timer.cancel()
+    class FakeMessage: pass
+    fake = FakeMessage()
+    fake.chat = type("obj", (), {"id": chat_id})
+    fake.message_thread_id = thread_id
+    fake.from_user = type("obj", (), {"id": user_id, "full_name": ""})
+    await process_documents(bot, fake, files)
 
 
 async def on_media_group_message(message: Message, bot: Bot):
     if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
         return
-
-    chat_id = message.chat.id
-    thread_id = message.message_thread_id
-    user_id = message.from_user.id
-    buffer_key = (chat_id, thread_id)
-
-    if message.document:
-        file = message.document
-    elif message.photo:
-        file = message.photo[-1]
-    else:
+    file = message.document if message.document else (message.photo[-1] if message.photo else None)
+    if not file:
         return
-
-    TEMP_DIR = Path("data/uploads")
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    file_info = await bot.get_file(file.file_id)
-    dest_path = TEMP_DIR / (file.file_name if message.document else f"{file.file_id}.jpg")
-    await bot.download_file(file_info.file_path, destination=dest_path)
-
-    media_buffers[buffer_key].append({
-        "name": dest_path.name,
-        "path": str(dest_path),
-    })
-
-    if buffer_key in media_timers:
-        media_timers[buffer_key].cancel()
-    loop = asyncio.get_event_loop()
-    media_timers[buffer_key] = loop.call_later(
-        MEDIA_GROUP_DELAY,
-        lambda: asyncio.create_task(
-            flush_media_group(bot, chat_id, thread_id, user_id)
-        ),
-    )
+    temp_dir = Path("data/uploads")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    tg_file = await bot.get_file(file.file_id)
+    dest = temp_dir / (file.file_name if message.document else f"{file.file_id}.jpg")
+    await bot.download_file(tg_file.file_path, destination=dest)
+    key = (message.chat.id, message.message_thread_id)
+    media_buffers[key].append({"name": dest.name, "path": str(dest)})
+    if key in media_timers:
+        media_timers[key].cancel()
+    loop = asyncio.get_running_loop()
+    media_timers[key] = loop.call_later( MEDIA_GROUP_DELAY, lambda: asyncio.create_task(flush_media_group(bot, key[0], key[1], message.from_user.id)))
 
 
 async def cmd_start(message: Message):
     await message.answer(
-        "👋 Привет! Я бот для обработки тендеров.\n"
-        "Отправьте мне документы (PDF, DOCX, XLSX, ZIP, фото) в эту тему, "
-        "и я извлеку из них ключевые данные и создам сводную карточку.\n\n"
-        "Когда карточка тендера готова — напишите /поставщики, чтобы найти "
-        "подходящих поставщиков."
+        "👋 Привет! Пришлите документы тендера в тему. Бот извлечёт ТЗ, сроки, НМЦК и позиции.\n\n"
+        "После анализа можно выбрать позицию и найти конкретные модели.\n"
+        "Для ручного поиска поставщиков: /поставщики_запрос текст"
     )
 
 
+async def cmd_models(message: Message):
+    if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
+        return
+    tender = await db.get_tender_by_thread(str(message.chat.id), str(message.message_thread_id))
+    if not tender:
+        await message.answer("Сначала пришлите документы тендера в эту тему.")
+        return
+    items = await db.get_tender_items(tender["id"])
+    keyboard = models_keyboard(items)
+    if not keyboard:
+        await message.answer("В тендере пока нет распознанных позиций.")
+        return
+    await message.answer("Выберите позицию для поиска моделей:", reply_markup=keyboard)
+
+
+async def callback_model_item(callback: CallbackQuery):
+    try:
+        item_id = int(callback.data.split(":", 1)[1])
+    except Exception:
+        await callback.answer("Некорректная позиция")
+        return
+    await callback.answer("Ищу модели...")
+    async with db.pool.acquire() as conn:
+        item_row = await conn.fetchrow("SELECT * FROM tender_items WHERE id=$1", item_id)
+        if not item_row:
+            await callback.message.answer("Позиция не найдена.")
+            return
+        tender = await conn.fetchrow("SELECT * FROM tenders WHERE id=$1", item_row["tender_id"])
+    item = dict(item_row)
+    requirements = item.get("requirements") or []
+    if isinstance(requirements, str):
+        requirements = json.loads(requirements)
+    item["requirements"] = requirements
+    region = tender["region"] if tender else None
+    await callback.message.answer(f"🔎 Ищу модели для: {item['name']}...")
+    found = await search_models(item, region=region, max_models=10)
+    if not found:
+        await callback.message.answer("Конкретных моделей с подтверждёнными данными не найдено. Попробуйте уточнить требования или искать вручную.")
+        return
+
+    saved = []
+    for model in found:
+        comparison = match_model(requirements, model.get("specifications") or {})
+        model["match_status"] = comparison["status"]
+        model["match_result"] = comparison
+        model_id = await db.save_product_model(item_id, model)
+        model["id"] = model_id
+        saved.append(model)
+
+    lines = [f"Найдено моделей: {len(saved)}", ""]
+    for idx, model in enumerate(saved, 1):
+        status = model["match_status"]
+        icon = {"MATCH": "✅", "NEEDS_CLARIFICATION": "⚠️", "UNKNOWN": "❓", "REJECTED": "❌"}.get(status, "❓")
+        price = f", {model['price']:,.2f} ₽" if model.get("price") is not None else ""
+        lines.append(f"{icon} {idx}. <b>{model.get('manufacturer') or ''} {model.get('model')}</b>{price}")
+        lines.append(f"   {status}")
+        lines.append(f"   {model.get('source_url')}")
+    await callback.message.answer("\n".join(lines)[:3800], parse_mode="HTML", reply_markup=model_results_keyboard(saved, item_id))
+
+
+async def callback_model_select(callback: CallbackQuery):
+    try:
+        _, item_id_raw, model_id_raw = callback.data.split(":")
+        item_id, model_id = int(item_id_raw), int(model_id_raw)
+    except Exception:
+        await callback.answer("Некорректный выбор")
+        return
+    await db.select_product_model(model_id, item_id)
+    await callback.answer("Модель выбрана")
+    models = await db.get_product_models(item_id)
+    selected = next((m for m in models if m.get("id") == model_id), None)
+    if not selected:
+        await callback.message.answer("Модель не найдена.")
+        return
+    await callback.message.answer(
+        f"✅ Выбрана модель: <b>{selected.get('manufacturer') or ''} {selected.get('model')}</b>\n"
+        f"Статус соответствия ТЗ: <b>{selected.get('match_status')}</b>\n\n"
+        "Поиск поставщиков для этой модели будет следующим этапом.",
+        parse_mode="HTML",
+    )
+
+
+# ---------------------- ПОСТАВЩИКИ: текущий ручной режим ----------------------
 def _build_supplier_query(tender: dict) -> str:
+    items = _as_list(tender.get("items"))
     parts = []
-
-    items = tender.get("items")
-    if isinstance(items, str):
-        try:
-            items = json.loads(items)
-        except Exception:
-            items = []
-
     if items:
-        names = [i.get("name", "").strip() for i in items if i.get("name")]
-        parts.append(", ".join(names[:3]))
+        parts.append(", ".join(i.get("name", "").strip() for i in items[:3] if i.get("name")))
     elif tender.get("subject"):
         parts.append(tender["subject"][:60])
-    elif tender.get("tender_name"):
-        parts.append(tender["tender_name"])
-
-    region = tender.get("region") or ""
-    location = None
-    if "(" in region:
-        location = region.split("(", 1)[0].strip().rstrip(",")
-    else:
-        location = region.split(",")[0].strip()
-    if location:
-        parts.append(location)
-
+    if tender.get("region"):
+        parts.append(str(tender["region"]).split(",")[0].strip())
     return ", ".join(p for p in parts if p)
 
 
 def _format_supplier_candidates(results: list[dict]) -> str:
-    lines = ["Нашёл кандидатов — ответьте номерами через запятую, кого сохранить (например: 1,3):", ""]
+    lines = ["Нашёл кандидатов — ответьте номерами через запятую, кого сохранить:", ""]
     for idx, org in enumerate(results, 1):
         line = f"{idx}. <b>{org['name']}</b>"
-        if org.get("address"):
-            line += f"\n    {org['address']}"
-        if org.get("phone"):
-            line += f"\n    ☎️ {org['phone']}"
-        if org.get("email"):
-            line += f"\n    ✉️ {org['email']}"
-        if org.get("url"):
-            line += f"\n    🌐 {org['url']}"
+        if org.get("address"): line += f"\n    {org['address']}"
+        if org.get("phone"): line += f"\n    ☎️ {org['phone']}"
+        if org.get("email"): line += f"\n    ✉️ {org['email']}"
+        if org.get("url"): line += f"\n    🌐 {org['url']}"
         lines.append(line)
     return "\n".join(lines)
 
@@ -458,67 +358,35 @@ def _format_supplier_candidates(results: list[dict]) -> str:
 async def cmd_find_suppliers(message: Message):
     if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
         return
-
-    chat_id = message.chat.id
-    thread_id = message.message_thread_id
-
-    tender = await db.get_tender_by_thread(str(chat_id), str(thread_id))
-    if not tender or not tender.get("tender_name"):
-        await message.answer(
-            "Ещё не собрана карточка тендера в этой теме — сначала пришлите документы."
-        )
+    tender = await db.get_tender_by_thread(str(message.chat.id), str(message.message_thread_id))
+    if not tender:
+        await message.answer("Сначала пришлите документы тендера.")
         return
-
     query = _build_supplier_query(tender)
     if not query:
-        await message.answer("Не смог собрать поисковый запрос по данным тендера.")
+        await message.answer("Не смог собрать запрос.")
         return
-
     await message.answer(f"Ищу поставщиков по запросу: «{query}»...")
-
-    try:
-        results = await asyncio.wait_for(search_suppliers_web(query), timeout=90)
-    except asyncio.TimeoutError:
-        await message.answer("Поиск занял слишком много времени, попробуйте ещё раз.")
-        return
-
+    results = await search_suppliers_web(query)
     if not results:
-        await message.answer(
-            "Ничего не нашлось. Попробуйте команду /поставщики_запрос <свой запрос>, "
-            "например: /поставщики_запрос спецодежда Саратов"
-        )
+        await message.answer("Ничего не найдено.")
         return
-
-    pending_supplier_results[(chat_id, thread_id)] = results
+    pending_supplier_results[(message.chat.id, message.message_thread_id)] = results
     await message.answer(_format_supplier_candidates(results), parse_mode="HTML")
 
 
 async def cmd_find_suppliers_custom(message: Message):
     if TENDER_GROUP_ID and message.chat.id != TENDER_GROUP_ID:
         return
-
-    query = message.text.split(maxsplit=1)
-    if len(query) < 2 or not query[1].strip():
-        await message.answer("Укажите запрос после команды, например: /поставщики_запрос спецодежда Саратов")
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Пример: /поставщики_запрос ЭЦВ 6-10-110 Москва")
         return
-
-    query_text = query[1].strip()
-    chat_id = message.chat.id
-    thread_id = message.message_thread_id
-
-    await message.answer(f"Ищу поставщиков по запросу: «{query_text}»...")
-
-    try:
-        results = await asyncio.wait_for(search_suppliers_web(query_text), timeout=90)
-    except asyncio.TimeoutError:
-        await message.answer("Поиск занял слишком много времени, попробуйте ещё раз.")
-        return
-
+    results = await search_suppliers_web(parts[1].strip())
     if not results:
-        await message.answer("Ничего не нашлось и по этому запросу. Попробуйте ещё проще, например только категорию и область.")
+        await message.answer("Ничего не найдено.")
         return
-
-    pending_supplier_results[(chat_id, thread_id)] = results
+    pending_supplier_results[(message.chat.id, message.message_thread_id)] = results
     await message.answer(_format_supplier_candidates(results), parse_mode="HTML")
 
 
@@ -526,64 +394,40 @@ async def handle_supplier_selection(message: Message):
     key = (message.chat.id, message.message_thread_id)
     if key not in pending_supplier_results:
         return
-
     text = (message.text or "").strip()
     if not text or not all(c.isdigit() or c in ", " for c in text):
         return
-
     try:
         indices = [int(x.strip()) for x in text.split(",") if x.strip()]
     except ValueError:
         return
-
     results = pending_supplier_results[key]
     tender = await db.get_tender_by_thread(str(message.chat.id), str(message.message_thread_id))
     categories = [tender.get("classification")] if tender and tender.get("classification") else []
-    city = tender.get("region") if tender else None
-
     saved = []
     for idx in indices:
-        if idx < 1 or idx > len(results):
-            continue
-        org = results[idx - 1]
-        email = org.get("email")
-        supplier_id = await db.add_supplier(
-            name=org.get("name"),
-            phone=org.get("phone"),
-            email=email,
-            city=city,
-            categories=categories,
-            url=org.get("url"),
-        )
-        saved.append((org.get("name"), email, supplier_id))
-
-    del pending_supplier_results[key]
-
-    if not saved:
-        await message.answer("Не удалось сохранить выбранные позиции — проверьте номера.")
-        return
-
-    lines = ["Сохранено:"]
-    for name, email, supplier_id in saved:
-        lines.append(f"— {name} (email: {email or 'не найден'})")
-    await message.answer("\n".join(lines))
+        if 1 <= idx <= len(results):
+            org = results[idx - 1]
+            supplier_id = await db.add_supplier(org.get("name"), org.get("phone"), org.get("email"), tender.get("region") if tender else None, categories, org.get("url"))
+            saved.append((org.get("name"), supplier_id))
+    pending_supplier_results.pop(key, None)
+    await message.answer("Сохранено:\n" + "\n".join(f"— {name}" for name, _ in saved) if saved else "Не удалось сохранить выбранные позиции.")
 
 
-# ---------------------- ЗАПУСК ----------------------
 async def main():
     check_settings()
-
     db_pool = await db.create_pool()
     await db.set_pool(db_pool)
     await db.init_db()
-    print("База данных готова")
-
     bot = Bot(token=TELEGRAM_TOKEN)
     dp = Dispatcher()
 
     dp.message.register(cmd_start, Command("start"))
+    dp.message.register(cmd_models, Command("модели"))
     dp.message.register(cmd_find_suppliers, Command("поставщики"))
     dp.message.register(cmd_find_suppliers_custom, Command("поставщики_запрос"))
+    dp.callback_query.register(callback_model_item, F.data.startswith("model_item:"))
+    dp.callback_query.register(callback_model_select, F.data.startswith("model_select:"))
     dp.message.register(handle_supplier_selection, F.text)
 
     @dp.message(F.document | F.photo, ~F.media_group_id)
