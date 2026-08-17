@@ -256,6 +256,36 @@ async def init_db():
         """)
 
         # ----------------------------------------------------
+        # Миграция tender_items
+        #
+        # В старой БД таблица могла существовать без UNIQUE.
+        # CREATE TABLE IF NOT EXISTS не меняет существующую таблицу,
+        # поэтому ON CONFLICT (tender_id, position_number) падает:
+        # there is no unique or exclusion constraint matching
+        # the ON CONFLICT specification
+        #
+        # Сначала удаляем дубли.
+        # Затем создаём UNIQUE INDEX.
+        # ----------------------------------------------------
+
+        await conn.execute("""
+            DELETE FROM tender_items a
+            USING tender_items b
+            WHERE a.id > b.id
+              AND a.tender_id = b.tender_id
+              AND a.position_number = b.position_number;
+        """)
+
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            tender_items_tender_position_idx
+            ON tender_items (
+                tender_id,
+                position_number
+            );
+        """)
+
+        # ----------------------------------------------------
         # Миграция product_models
         #
         # В старой БД таблица могла существовать без UNIQUE.
