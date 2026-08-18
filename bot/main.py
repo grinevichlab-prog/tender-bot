@@ -166,7 +166,7 @@ async def process_documents(bot: Bot, message: Message, files: list[dict]):
         if raw:
             analyses.append(json.loads(raw) if isinstance(raw, str) else raw)
 
-    merged = merge_analyses(analyses)
+    merged = await merge_analyses(analyses)
     await db.update_tender_analysis(tender_id, merged)
     await db.sync_tender_items(tender_id, merged.get("items") or [])
 
