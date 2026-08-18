@@ -28,27 +28,20 @@ def _extract_json(text: str) -> dict | None:
     if not text:
         return None
     text = text.strip()
-    # убрать markdown блоки
     if "```" in text:
         m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
         if m:
             text = m.group(1)
-    # найти первый { ... }
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if not m:
         return None
-    raw = m.group(0)
-    # чистка
-    raw = raw.strip()
+    raw = m.group(0).strip()
     for _ in range(2):
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            # убрать trailing запятые
             raw = re.sub(r",\s*}", "}", raw)
             raw = re.sub(r",\s*]", "]", raw)
-            # заменить одинарные кавычки на двойные если json битый
-            # пробуем более мягкий парсинг
             continue
     return None
 
@@ -56,14 +49,12 @@ def _chunk_text(text: str, size: int = MAX_CHUNK) -> list[str]:
     if len(text) <= size:
         return [text]
     chunks = []
-    # режем по абзацам чтобы не рвать посередине позиции
     start = 0
     while start < len(text):
         end = start + size
         if end >= len(text):
             chunks.append(text[start:])
             break
-        # ищем ближайший перенос строки назад
         cut = text.rfind("\n", start, end)
         if cut == -1 or cut <= start + size // 2:
             cut = end
@@ -76,17 +67,14 @@ async def _call_yandex(chunk: str, retries: int = 2) -> dict:
         "Authorization": f"Api-Key {YANDEX_API_KEY}",
         "Content-Type": "application/json"
     }
-    # первый запрос
-    messages = [
-        {"role": "system", "text": SYSTEM_PROMPT},
-        {"role": "user", "text": chunk[:MAX_CHUNK]}
-    ]
     body = {
         "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest",
         "completionOptions": {"stream": False, "temperature": 0.1, "maxTokens": MAX_TOKENS},
-        "messages": messages
+        "messages": [
+            {"role": "system", "text": SYSTEM_PROMPT},
+            {"role": "user", "text": chunk[:MAX_CHUNK]}
+        ]
     }
-
     for attempt in range(retries + 1):
         try:
             async with aiohttp.ClientSession() as session:
@@ -97,18 +85,15 @@ async def _call_yandex(chunk: str, retries: int = 2) -> dict:
                     except (KeyError, IndexError, TypeError):
                         logger.warning(f"YandexGPT unexpected response: {json.dumps(data, ensure_ascii=False)[:1000]}")
                         text = ""
-
                     if not text:
                         if attempt < retries:
                             await asyncio.sleep(1)
                             continue
                         return {"items": []}
-
                     low = text.lower()
                     if "не могу обсуждать" in low or "давайте поговорим" in low or "не могу помочь" in low:
                         logger.warning(f"YandexGPT filter triggered, attempt {attempt+1}: {text[:200]}")
                         if attempt < retries:
-                            # ретрай с repair промптом и коротким чанком
                             body["messages"] = [
                                 {"role": "system", "text": SYSTEM_PROMPT},
                                 {"role": "user", "text": REPAIR_PROMPT + "\n" + chunk[:5000]}
@@ -116,10 +101,8 @@ async def _call_yandex(chunk: str, retries: int = 2) -> dict:
                             await asyncio.sleep(1)
                             continue
                         return {"items": []}
-
                     parsed = _extract_json(text)
                     if parsed is not None and "items" in parsed and isinstance(parsed["items"], list):
-                        # валидация полей
                         for it in parsed["items"]:
                             if "name" not in it or not it["name"]:
                                 it["name"] = "Не указано"
@@ -130,7 +113,6 @@ async def _call_yandex(chunk: str, retries: int = 2) -> dict:
                             if "requirements" not in it:
                                 it["requirements"] = []
                         return parsed
-
                     logger.warning(f"YandexGPT returned invalid JSON attempt {attempt+1}: {text[:500]}")
                     if attempt < retries:
                         body["messages"] = [
@@ -152,20 +134,15 @@ async def _call_yandex(chunk: str, retries: int = 2) -> dict:
                 await asyncio.sleep(1)
                 continue
             return {"items": []}
-
     return {"items": []}
 
 async def analyze_text(full_text: str) -> dict:
-    """Анализирует весь текст, делит на чанки если > MAX_CHUNK"""
     if not full_text or len(full_text.strip()) < 50:
         return {"items": []}
-    
     chunks = _chunk_text(full_text)
     logger.info(f"[ai_analyzer] текст {len(full_text)} символов, чанков {len(chunks)}")
-    
     all_items = []
     pos = 1
-    
     for idx, ch in enumerate(chunks):
         logger.info(f"[ai_analyzer] чанк {idx+1}/{len(chunks)} символов {len(ch)}")
         res = await _call_yandex(ch)
@@ -175,30 +152,25 @@ async def analyze_text(full_text: str) -> dict:
             it["position_number"] = pos
             pos += 1
             all_items.append(it)
-    
     logger.info(f"[ai_analyzer] итого {len(all_items)} позиций")
     return {"items": all_items}
 
-# Алиасы для совместимости с main.py - оставь имя которое у тебя вызывается
 async def analyze_documents(text: str) -> dict:
     return await analyze_text(text)
 
 async def merge_and_analyze(texts: list[str]) -> dict:
     full = "\n\n".join(t for t in texts if t)
     return await analyze_text(full)
-# Алиасы для совместимости с main.py
+
 async def analyze_tender_document(text: str) -> dict:
-    """Алиас для analyze_text"""
     return await analyze_text(text)
 
 async def merge_analyses(analyses: list[dict]) -> dict:
-    """Объединяет результаты анализа нескольких документов"""
     all_items = []
     pos = 1
     for a in analyses:
-        for it in a.get("items", []):
+        for it in a.get("items", []) if isinstance(a, dict) else []:
             it["position_number"] = pos
             pos += 1
             all_items.append(it)
     return {"items": all_items}
-    async def merge_and_analyze(texts: list[str]) -> dict:
