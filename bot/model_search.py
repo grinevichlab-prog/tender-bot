@@ -91,11 +91,22 @@ async def _search(query: str, max_results: int = 10) -> list[dict]:
     return result
 
 
-def build_model_queries(item: dict, region: str | None = None) -> list[str]:
+def build_model_queries(item: dict | str, region: str | None = None) -> list[str]:
+    # защита если item пришел строкой из-за битого ai_analyzer
+    if isinstance(item, str):
+        item = {"name": item, "requirements": []}
+    if not isinstance(item, dict):
+        return []
     name = (item.get("name") or "").strip()
+    if not name:
+        return []
     requirements = item.get("requirements") or []
     important = []
     for req in requirements[:5]:
+        if isinstance(req, str):
+            continue
+        if not isinstance(req, dict):
+            continue
         parameter = req.get("parameter") or req.get("name")
         value = req.get("value")
         unit = req.get("unit")
@@ -159,7 +170,11 @@ async def _extract_model(page_text: str) -> dict | None:
         return None
 
 
-async def search_models(item: dict, region: str | None = None, max_models: int = 12) -> list[dict]:
+async def search_models(item: dict | str, region: str | None = None, max_models: int = 12) -> list[dict]:
+    if isinstance(item, str):
+        item = {"name": item, "requirements": []}
+    if not isinstance(item, dict):
+        return []
     candidates = []
     seen_urls = set()
     for query in build_model_queries(item, region):
