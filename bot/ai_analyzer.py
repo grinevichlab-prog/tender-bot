@@ -186,3 +186,19 @@ async def analyze_documents(text: str) -> dict:
 async def merge_and_analyze(texts: list[str]) -> dict:
     full = "\n\n".join(t for t in texts if t)
     return await analyze_text(full)
+# Алиасы для совместимости с main.py
+async def analyze_tender_document(text: str) -> dict:
+    """Алиас для analyze_text"""
+    return await analyze_text(text)
+
+async def merge_analyses(analyses: list[dict]) -> dict:
+    """Объединяет результаты анализа нескольких документов"""
+    all_items = []
+    pos = 1
+    for a in analyses:
+        for it in a.get("items", []):
+            it["position_number"] = pos
+            pos += 1
+            all_items.append(it)
+    return {"items": all_items}
+    async def merge_and_analyze(texts: list[str]) -> dict:
