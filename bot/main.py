@@ -114,7 +114,7 @@ async def handle_attachment(message: Message, bot: Bot):
             texts = []
             for f in files:
                 try:
-                   text = extract_text(str(f), f.suffix)
+                    text = extract_text(str(f), f.suffix)
                     if text and len(text) > 50:
                         texts.append(text)
                         logger.info(f"[extract_text] готово {f.name}, символов: {len(text)}")
