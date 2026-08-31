@@ -224,12 +224,6 @@ async def view_tender(callback: CallbackQuery):
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=tender_actions(tender_id))
     await callback.answer()
 
-@router.callback_query(F.data.startswith("delete_") and ~F.data.startswith("delete_supplier_"))
-async def delete_tender(callback: CallbackQuery):
-    tender_id = int(callback.data.split("_")[1])
-    await db.delete_tender(tender_id)
-    await callback.message.edit_text("🗑 Тендер удален.")
-    await callback.answer()
 @router.callback_query(F.data.startswith("show_export_"))
 async def show_export_menu(callback: CallbackQuery):
     tender_id = int(callback.data.split("_")[2])
