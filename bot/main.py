@@ -32,6 +32,20 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+# ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
+
+def _plural(num: int, forms: tuple) -> str:
+    """Склонение: (1 позиция, 2 позиции, 5 позиций)"""
+    n = abs(num) % 100
+    if 10 < n < 20:
+        return forms[2]
+    n = n % 10
+    if n == 1:
+        return forms[0]
+    if 2 <= n <= 4:
+        return forms[1]
+    return forms[2]
+
 # ============ СТАРТ И ПОМОЩЬ ============
 
 @router.message(Command("start"))
@@ -239,12 +253,16 @@ async def delete_tender(callback: CallbackQuery):
     await db.delete_tender(tender_id)
     await callback.message.edit_text("🗑 Тендер удален.")
     await callback.answer()
+
 # ============ ПОИСК МОДЕЛЕЙ ============
 
 @router.callback_query(F.data.startswith("search_"))
 async def search_tender_models(callback: CallbackQuery):
     tender_id = int(callback.data.split("_")[1])
     items = await db.get_tender_items(tender_id)
+    
+    items_count = len(items)
+    items_word = _plural(items_count, ("позиции", "позиций", "позиций"))
     
     # Проверяем сколько позиций уже имеют модели
     items_with_models = 0
@@ -256,45 +274,103 @@ async def search_tender_models(callback: CallbackQuery):
     # Если уже есть модели — предлагаем обновить
     if items_with_models > 0:
         await callback.answer(
-            f"⚠️ Найдены модели для {items_with_models} позиций.\n"
+            f"⚠️ Найдены модели для {items_with_models} {_plural(items_with_models, ('позиции', 'позиций', 'позиций'))}.\n"
             "Повторный поиск может дать другие результаты.\n"
             "Продолжить?",
             show_alert=True
         )
-        # Можно добавить кнопку подтверждения, но пока продолжаем
     
-    await callback.message.edit_text(f"🔍 Ищу модели для {len(items)} позиций...\nЭто может занять 2-5 минут.")
+    await callback.message.edit_text(
+        f"🔍 Ищу модели для {items_count} {items_word}...\n"
+        f"Это может занять от 2 до 5 минут."
+    )
     
     found_count = 0
+    processed_items = []
+    
     for idx, item in enumerate(items, 1):
-        # Пропускаем если уже есть модели (для ускорения)
+        # Пропускаем если уже есть модели
         existing = await db.get_models(item['id'])
         if existing:
             found_count += len(existing)
             continue
         
+        logger.info(f"[search_models] Ищу модели для позиции {idx}: {item['name']}")
+        
         models = await search_models(item, region=None, max_models=10)
+        
         if models:
             await db.save_models(item['id'], models)
             found_count += len(models)
+            
+            # Анализируем соответствие (берем первую модель)
+            best_model = models[0]
+            match_status = "✅ Полное соответствие"
+            
+            # Простая проверка соответствия по наличию характеристик
+            requirements = item.get('requirements') or []
+            if requirements and isinstance(requirements, list):
+                specs = best_model.get('specifications', {})
+                matched = 0
+                for req in requirements[:5]:
+                    if isinstance(req, dict):
+                        param = req.get('parameter') or req.get('name')
+                        if param and any(param.lower() in str(k).lower() for k in specs.keys()):
+                            matched += 1
+                
+                total_reqs = min(len(requirements), 5)
+                if matched == 0:
+                    match_status = "⚠️ Не соответствует ТЗ"
+                elif matched < total_reqs // 2:
+                    match_status = "🔶 Частичное соответствие"
+                elif matched < total_reqs:
+                    match_status = "🟡 Хорошее соответствие"
+            
+            processed_items.append({
+                'name': item['name'][:40],
+                'models_count': len(models),
+                'match': match_status
+            })
+            
+            logger.info(f"[search_models] Найдено {len(models)} моделей для '{item['name']}', статус: {match_status}")
+        else:
+            logger.warning(f"[search_models] Модели не найдены для '{item['name']}'")
+            processed_items.append({
+                'name': item['name'][:40],
+                'models_count': 0,
+                'match': "❌ Не найдено"
+            })
         
-        # Обновляем прогресс каждые 3 позиции
-        if idx % 3 == 0:
+        # Обновляем прогресс каждые 2 позиции
+        if idx % 2 == 0 or idx == items_count:
             try:
-                await callback.message.edit_text(
-                    f"🔍 Обработано {idx}/{len(items)} позиций...\n"
-                    f"Найдено моделей: {found_count}"
-                )
-            except:
-                pass
+                progress_text = f"🔍 Обработано {idx}/{items_count} {_plural(idx, ('позиция', 'позиции', 'позиций'))}\n"
+                progress_text += f"Найдено моделей: {found_count}\n\n"
+                
+                # Показываем последние 3 обработанные позиции
+                for pi in processed_items[-3:]:
+                    progress_text += f"• {pi['name']}: {pi['models_count']} шт. {pi['match']}\n"
+                
+                await callback.message.edit_text(progress_text)
+            except Exception as e:
+                logger.warning(f"[search_models] Не удалось обновить прогресс: {e}")
         
-        await asyncio.sleep(2)  # увеличил задержку до 2 сек
+        await asyncio.sleep(2)
+    
+    # Финальный отчет
+    summary_text = f"✅ Поиск завершен!\n\n"
+    summary_text += f"📊 Обработано: {items_count} {_plural(items_count, ('позиция', 'позиции', 'позиций'))}\n"
+    summary_text += f"🔍 Найдено моделей: {found_count}\n\n"
+    summary_text += "<b>Результаты по позициям:</b>\n\n"
+    
+    for pi in processed_items:
+        summary_text += f"• {pi['name']}\n  {pi['models_count']} моделей {pi['match']}\n\n"
+    
+    summary_text += "Выберите позицию для просмотра найденных моделей."
     
     await callback.message.edit_text(
-        f"✅ Поиск завершен!\n\n"
-        f"Найдено моделей: {found_count}\n"
-        f"Для {len(items)} позиций\n\n"
-        "Выберите позицию для просмотра найденных моделей.",
+        summary_text,
+        parse_mode="HTML",
         reply_markup=tender_actions(tender_id)
     )
     await callback.answer()
@@ -442,29 +518,8 @@ async def supplier_margin_received(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("cp_"))
 async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
-    logger.info(f"[generate_cp_start] triggered, callback_data={callback.data}")  # ← добавь
+    logger.info(f"[generate_cp_start] triggered, callback_data={callback.data}")
     tender_id = int(callback.data.split("_")[1])
-    
-    user_id = await db.get_or_create_user(
-        telegram_id=callback.from_user.id,
-        name=callback.from_user.full_name or "User"
-    )
-    
-    logger.info(f"[generate_cp_start] user_id={user_id}, tender_id={tender_id}")  # ← добавь
-    
-    suppliers = await get_suppliers(user_id)
-    
-    if not suppliers:
-        await callback.answer("Сначала добавьте поставщика через /add_supplier", show_alert=True)
-        return
-    
-    text = "👥 Выберите поставщика для КП:\n\n"
-    for s in suppliers:
-        text += f"/supplier_{s['id']} - {s['name']} (наценка {s.get('default_margin', 1.2):.0%})\n"
-    
-    await state.update_data(tender_id=tender_id)
-    await callback.message.edit_text(text)
-    await callback.answer()
     
     # Получаем user_id
     user_id = await db.get_or_create_user(
@@ -472,7 +527,11 @@ async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
         name=callback.from_user.full_name or "User"
     )
     
+    logger.info(f"[generate_cp_start] user_id={user_id}, tender_id={tender_id}")
+    
     suppliers = await get_suppliers(user_id)
+    
+    logger.info(f"[generate_cp_start] found {len(suppliers)} suppliers")
     
     if not suppliers:
         await callback.answer("Сначала добавьте поставщика через /add_supplier", show_alert=True)
@@ -485,6 +544,7 @@ async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
     await state.update_data(tender_id=tender_id)
     await callback.message.edit_text(text)
     await callback.answer()
+
 @router.message(F.text.regexp(r"^/supplier_(\d+)$"))
 async def supplier_selected(message: Message, state: FSMContext):
     supplier_id = int(message.text.split("_")[1])
