@@ -36,7 +36,12 @@ router = Router()
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
-    await db.init_db()
+    # Создаем пользователя если его нет
+    user_id = await db.get_or_create_user(
+        telegram_id=message.from_user.id,
+        name=message.from_user.full_name or "User"
+    )
+    
     await message.answer(
         "👋 Добро пожаловать в TenderBot!\n\n"
         "Я помогу вам:\n"
@@ -60,7 +65,7 @@ async def cmd_help(message: Message):
         "<b>3. Поиск моделей:</b>\n"
         "Выберите позицию → 'Найти модели' → система найдет подходящие товары\n\n"
         "<b>4. Поставщики:</b>\n"
-        "Добавьте поставщиков с их наценкой через 'Поставщики' → 'Добавить'\n\n"
+        "Добавьте поставщиков с их наценкой через /add_supplier\n\n"
         "<b>5. Генерация КП:</b>\n"
         "Тендер → 'Генерация КП' → выберите поставщика → укажите условия\n\n"
         "<b>6. Экспорт:</b>\n"
@@ -90,6 +95,12 @@ async def handle_attachment(message: Message, bot: Bot):
         return
     
     status_msg = await message.answer("⏳ Скачиваю файл...")
+    
+    # Создаем/получаем пользователя
+    user_id = await db.get_or_create_user(
+        telegram_id=message.from_user.id,
+        name=message.from_user.full_name or "User"
+    )
     
     file = await bot.get_file(doc.file_id)
     dest = Path(tempfile.gettempdir()) / doc.file_name
@@ -138,9 +149,9 @@ async def handle_attachment(message: Message, bot: Bot):
             
             await status_msg.edit_text(f"💾 Сохраняю {len(items)} позиций в БД...")
             
-            # Создаем тендер
+            # Создаем тендер с правильным user_id
             tender_id = await db.create_tender(
-                user_id=message.from_user.id,
+                user_id=user_id,
                 name=doc.file_name.replace('.zip', ''),
                 number=None,
                 region=None
@@ -171,7 +182,13 @@ async def handle_attachment(message: Message, bot: Bot):
 
 @router.message(F.text == "📋 Мои тендеры")
 async def list_tenders(message: Message):
-    tenders = await db.get_user_tenders(message.from_user.id)
+    # Получаем user_id из таблицы users
+    user_id = await db.get_or_create_user(
+        telegram_id=message.from_user.id,
+        name=message.from_user.full_name or "User"
+    )
+    
+    tenders = await db.get_user_tenders(user_id)
     if not tenders:
         await message.answer("У вас пока нет тендеров. Загрузите ZIP-архив с документами.")
         return
@@ -289,7 +306,13 @@ async def select_item_model(callback: CallbackQuery):
 
 @router.message(F.text == "👥 Поставщики")
 async def suppliers_menu(message: Message):
-    suppliers = await get_suppliers(message.from_user.id)
+    # Получаем user_id
+    user_id = await db.get_or_create_user(
+        telegram_id=message.from_user.id,
+        name=message.from_user.full_name or "User"
+    )
+    
+    suppliers = await get_suppliers(user_id)
     
     if not suppliers:
         await message.answer(
@@ -309,6 +332,13 @@ async def suppliers_menu(message: Message):
 
 @router.message(Command("add_supplier"))
 async def add_supplier_start(message: Message, state: FSMContext):
+    # Сохраняем user_id в state
+    user_id = await db.get_or_create_user(
+        telegram_id=message.from_user.id,
+        name=message.from_user.full_name or "User"
+    )
+    await state.update_data(user_id=user_id)
+    
     await message.answer("👤 Введите название поставщика:")
     await state.set_state(SupplierStates.waiting_name)
 
@@ -354,7 +384,7 @@ async def supplier_margin_received(message: Message, state: FSMContext):
         contact=data['contact'],
         region=data['region'],
         margin=margin,
-        user_id=message.from_user.id
+        user_id=data['user_id']
     )
     
     await state.clear()
@@ -370,7 +400,14 @@ async def supplier_margin_received(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("cp_"))
 async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
     tender_id = int(callback.data.split("_")[1])
-    suppliers = await get_suppliers(callback.from_user.id)
+    
+    # Получаем user_id
+    user_id = await db.get_or_create_user(
+        telegram_id=callback.from_user.id,
+        name=callback.from_user.full_name or "User"
+    )
+    
+    suppliers = await get_suppliers(user_id)
     
     if not suppliers:
         await callback.answer("Сначала добавьте поставщика через /add_supplier", show_alert=True)
@@ -507,8 +544,14 @@ async def handle_export(callback: CallbackQuery):
 
 @router.message(F.text == "📊 Статистика")
 async def show_stats(message: Message):
-    tenders = await db.get_user_tenders(message.from_user.id)
-    suppliers = await get_suppliers(message.from_user.id)
+    # Получаем user_id
+    user_id = await db.get_or_create_user(
+        telegram_id=message.from_user.id,
+        name=message.from_user.full_name or "User"
+    )
+    
+    tenders = await db.get_user_tenders(user_id)
+    suppliers = await get_suppliers(user_id)
     
     total_items = 0
     for t in tenders:
