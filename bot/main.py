@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 router = Router()
-from bot.supplier_search import search_suppliers_for_tender
+from bot.supplier_search import search_suppliers_web
 
 @router.callback_query(F.data.startswith("generate_cp_"))
 async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
