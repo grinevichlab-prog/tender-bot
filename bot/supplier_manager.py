@@ -1,5 +1,6 @@
 import asyncpg
 from config.settings import DATABASE_URL
+from bot import database as db
 
 async def add_supplier(name: str, inn: str, contact: str, region: str, margin: float, user_id: int) -> int:
     conn = await asyncpg.connect(DATABASE_URL)
@@ -17,7 +18,10 @@ async def get_suppliers(user_id: int) -> list[dict]:
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         rows = await conn.fetch(
-            "SELECT id, name, inn, region, default_margin FROM suppliers WHERE user_id = $1 ORDER BY name",
+            """SELECT id, name, inn, contact_person, region, default_margin 
+               FROM suppliers 
+               WHERE user_id = $1 
+               ORDER BY name""",
             user_id
         )
         return [dict(r) for r in rows]
@@ -27,7 +31,10 @@ async def get_suppliers(user_id: int) -> list[dict]:
 async def get_supplier(supplier_id: int) -> dict | None:
     conn = await asyncpg.connect(DATABASE_URL)
     try:
-        row = await conn.fetchrow("SELECT * FROM suppliers WHERE id = $1", supplier_id)
+        row = await conn.fetchrow(
+            "SELECT * FROM suppliers WHERE id = $1", 
+            supplier_id
+        )
         return dict(row) if row else None
     finally:
         await conn.close()
@@ -35,6 +42,8 @@ async def get_supplier(supplier_id: int) -> dict | None:
 async def update_supplier(supplier_id: int, **fields):
     conn = await asyncpg.connect(DATABASE_URL)
     try:
+        if not fields:
+            return
         set_parts = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(fields.keys()))
         query = f"UPDATE suppliers SET {set_parts} WHERE id = $1"
         await conn.execute(query, supplier_id, *fields.values())
