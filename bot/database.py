@@ -31,58 +31,7 @@ async def create_pool():
 async def set_pool(p):
     global pool
     pool = p
-async def save_models(tender_item_id: int, models: list[dict]):
-    """Сохраняет найденные модели для позиции тендера"""
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        # Удаляем старые модели для этой позиции
-        await conn.execute("DELETE FROM models WHERE tender_item_id = $1", tender_item_id)
-        
-        # Вставляем новые
-        for model in models:
-            await conn.execute("""
-                INSERT INTO models 
-                (tender_item_id, manufacturer, model, product_name, specifications, 
-                 price, currency, availability, source_url, source_title)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            """,
-                tender_item_id,
-                model.get('manufacturer'),
-                model.get('model'),
-                model.get('product_name'),
-                json.dumps(model.get('specifications', {})),
-                model.get('price'),
-                model.get('currency', 'RUB'),
-                model.get('availability'),
-                model.get('source_url'),
-                model.get('source_title')
-            )
-    finally:
-        await conn.close()
 
-async def get_models(tender_item_id: int) -> list[dict]:
-    """Получает найденные модели для позиции"""
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        rows = await conn.fetch(
-            "SELECT * FROM models WHERE tender_item_id = $1 ORDER BY id",
-            tender_item_id
-        )
-        return [dict(r) for r in rows]
-    finally:
-        await conn.close()
-
-async def select_model(tender_item_id: int, model_id: int):
-    """Привязывает выбранную модель к позиции тендера"""
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        await conn.execute("""
-            UPDATE tender_items 
-            SET selected_model_id = $1 
-            WHERE id = $2
-        """, model_id, tender_item_id)
-    finally:
-        await conn.close()
 
 # ============================================================
 # СОЗДАНИЕ ТАБЛИЦ
@@ -162,8 +111,8 @@ CREATE TABLE IF NOT EXISTS tender_items (
     quantity NUMERIC,
     unit TEXT,
     requirements JSONB,
-    created_at TIMESTAMP DEFAULT NOW(),
-    UNIQUE(tender_id, position_number)
+    selected_model_id INTEGER,
+    created_at TIMESTAMP DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS product_models (
@@ -183,6 +132,32 @@ CREATE TABLE IF NOT EXISTS product_models (
     match_result JSONB,
     selected BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS models (
+    id SERIAL PRIMARY KEY,
+    tender_item_id INTEGER REFERENCES tender_items(id) ON DELETE CASCADE,
+    manufacturer TEXT,
+    model TEXT,
+    product_name TEXT,
+    specifications JSONB,
+    price FLOAT,
+    currency TEXT DEFAULT 'RUB',
+    availability TEXT,
+    source_url TEXT,
+    source_title TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS commercial_offers (
+    id SERIAL PRIMARY KEY,
+    tender_id INTEGER REFERENCES tenders(id) ON DELETE CASCADE,
+    supplier_id INTEGER REFERENCES suppliers(id) ON DELETE CASCADE,
+    data JSONB NOT NULL,
+    total_amount FLOAT,
+    status TEXT DEFAULT 'draft',
+    created_at TIMESTAMP DEFAULT NOW(),
+    sent_at TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS supplier_deals (
@@ -228,58 +203,6 @@ CREATE TABLE IF NOT EXISTS tender_documents (
 # ============================================================
 
 async def init_db():
-            # Таблица поставщиков
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS suppliers (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                name TEXT NOT NULL,
-                inn TEXT,
-                contact_person TEXT,
-                phone TEXT,
-                email TEXT,
-                region TEXT,
-                default_margin FLOAT DEFAULT 1.2,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # Таблица найденных моделей
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS models (
-                id SERIAL PRIMARY KEY,
-                tender_item_id INTEGER REFERENCES tender_items(id) ON DELETE CASCADE,
-                manufacturer TEXT,
-                model TEXT,
-                product_name TEXT,
-                specifications JSONB,
-                price FLOAT,
-                currency TEXT DEFAULT 'RUB',
-                availability TEXT,
-                source_url TEXT,
-                source_title TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        
-        # Таблица коммерческих предложений
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS commercial_offers (
-                id SERIAL PRIMARY KEY,
-                tender_id INTEGER REFERENCES tenders(id) ON DELETE CASCADE,
-                supplier_id INTEGER REFERENCES suppliers(id) ON DELETE CASCADE,
-                data JSONB NOT NULL,
-                total_amount FLOAT,
-                status TEXT DEFAULT 'draft',
-                created_at TIMESTAMP DEFAULT NOW(),
-                sent_at TIMESTAMP
-            )
-        """)
-        
-        # Индексы
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_suppliers_user ON suppliers(user_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_models_item ON models(tender_item_id)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_co_tender ON commercial_offers(tender_id)")
     async with pool.acquire() as conn:
 
         await conn.execute(CREATE_TABLES_SQL)
@@ -357,19 +280,25 @@ async def init_db():
         await conn.execute("""
             ALTER TABLE suppliers
             ADD COLUMN IF NOT EXISTS url TEXT;
+            
+            ALTER TABLE suppliers
+            ADD COLUMN IF NOT EXISTS user_id BIGINT;
+            
+            ALTER TABLE suppliers
+            ADD COLUMN IF NOT EXISTS default_margin FLOAT DEFAULT 1.2;
+        """)
+        
+        # ----------------------------------------------------
+        # Поле selected_model_id в tender_items
+        # ----------------------------------------------------
+        
+        await conn.execute("""
+            ALTER TABLE tender_items
+            ADD COLUMN IF NOT EXISTS selected_model_id INTEGER;
         """)
 
         # ----------------------------------------------------
         # Миграция tender_items
-        #
-        # В старой БД таблица могла существовать без UNIQUE.
-        # CREATE TABLE IF NOT EXISTS не меняет существующую таблицу,
-        # поэтому ON CONFLICT (tender_id, position_number) падает:
-        # there is no unique or exclusion constraint matching
-        # the ON CONFLICT specification
-        #
-        # Сначала удаляем дубли.
-        # Затем создаём UNIQUE INDEX.
         # ----------------------------------------------------
 
         await conn.execute("""
@@ -391,14 +320,6 @@ async def init_db():
 
         # ----------------------------------------------------
         # Миграция product_models
-        #
-        # В старой БД таблица могла существовать без UNIQUE.
-        #
-        # Поэтому CREATE TABLE IF NOT EXISTS недостаточно:
-        # PostgreSQL НЕ меняет уже существующую таблицу.
-        #
-        # Сначала удаляем дубли.
-        # Затем создаём UNIQUE INDEX.
         # ----------------------------------------------------
 
         await conn.execute("""
@@ -419,8 +340,72 @@ async def init_db():
                 source_url
             );
         """)
+        
+        # ----------------------------------------------------
+        # Индексы для новых таблиц
+        # ----------------------------------------------------
+        
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_suppliers_user ON suppliers(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_models_item ON models(tender_item_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_co_tender ON commercial_offers(tender_id)")
 
         print("Таблицы БД проверены/созданы.")
+
+
+# ============================================================
+# МОДЕЛИ (для нового функционала поиска)
+# ============================================================
+
+async def save_models(tender_item_id: int, models: list[dict]):
+    """Сохраняет найденные модели для позиции тендера"""
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute("DELETE FROM models WHERE tender_item_id = $1", tender_item_id)
+        
+        for model in models:
+            await conn.execute("""
+                INSERT INTO models 
+                (tender_item_id, manufacturer, model, product_name, specifications, 
+                 price, currency, availability, source_url, source_title)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """,
+                tender_item_id,
+                model.get('manufacturer'),
+                model.get('model'),
+                model.get('product_name'),
+                json.dumps(model.get('specifications', {})),
+                model.get('price'),
+                model.get('currency', 'RUB'),
+                model.get('availability'),
+                model.get('source_url'),
+                model.get('source_title')
+            )
+    finally:
+        await conn.close()
+
+async def get_models(tender_item_id: int) -> list[dict]:
+    """Получает найденные модели для позиции"""
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            "SELECT * FROM models WHERE tender_item_id = $1 ORDER BY id",
+            tender_item_id
+        )
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+async def select_model(tender_item_id: int, model_id: int):
+    """Привязывает выбранную модель к позиции тендера"""
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute("""
+            UPDATE tender_items 
+            SET selected_model_id = $1 
+            WHERE id = $2
+        """, model_id, tender_item_id)
+    finally:
+        await conn.close()
 
 
 # ============================================================
@@ -463,6 +448,51 @@ async def get_or_create_user(
 # ============================================================
 # ТЕНДЕРЫ
 # ============================================================
+
+async def create_tender(user_id: int, name: str, number: str | None, region: str | None) -> int:
+    """Создает новый тендер для пользователя (для загрузки ZIP)"""
+    async with pool.acquire() as conn:
+        # Генерируем фейковый chat_id для совместимости со старой схемой
+        fake_chat_id = f"user_{user_id}"
+        fake_thread_id = f"tender_{name[:20]}"
+        
+        tender_id = await conn.fetchval(
+            """
+            INSERT INTO tenders (
+                user_id,
+                chat_id,
+                thread_id,
+                name,
+                tender_name
+            )
+            VALUES ($1, $2, $3, $4, $4)
+            RETURNING id
+            """,
+            user_id,
+            fake_chat_id,
+            fake_thread_id,
+            name
+        )
+        return tender_id
+
+async def get_user_tenders(user_id: int) -> list[dict]:
+    """Получает все тендеры пользователя"""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, name, created_at, nmck, region, status
+            FROM tenders
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+            """,
+            user_id
+        )
+        return [dict(r) for r in rows]
+
+async def delete_tender(tender_id: int):
+    """Удаляет тендер"""
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM tenders WHERE id = $1", tender_id)
 
 async def create_tender_for_thread(
     chat_id: str,
@@ -546,8 +576,6 @@ async def update_tender_analysis(
 
     summary = analysis.get("summary")
 
-    # Если срок поставки указан текстом,
-    # а не конкретной датой, не теряем информацию.
     if raw_deadline and not safe_deadline:
 
         note = (
@@ -804,10 +832,11 @@ async def get_tender_items(
 
         rows = await conn.fetch(
             """
-            SELECT *
-            FROM tender_items
-            WHERE tender_id = $1
-            ORDER BY position_number, id
+            SELECT ti.*, m.manufacturer, m.model, m.price as model_price
+            FROM tender_items ti
+            LEFT JOIN models m ON ti.selected_model_id = m.id
+            WHERE ti.tender_id = $1
+            ORDER BY ti.position_number, ti.id
             """,
             tender_id,
         )
@@ -837,29 +866,13 @@ async def get_tender_items(
 
 
 # ============================================================
-# МОДЕЛИ ТОВАРОВ
+# МОДЕЛИ ТОВАРОВ (старый функционал)
 # ============================================================
 
 async def save_product_model(
     tender_item_id: int,
     model: dict,
 ) -> int:
-    """
-    Сохраняет найденную модель.
-
-    ВАЖНО:
-
-    Здесь специально НЕ используется ON CONFLICT.
-
-    Причина:
-    существующая PostgreSQL БД могла быть создана
-    до появления уникального ограничения.
-
-    Мы сначала ищем существующую запись,
-    затем UPDATE либо INSERT.
-
-    Это позволяет корректно работать даже со старой БД.
-    """
 
     async with pool.acquire() as conn:
 
@@ -918,13 +931,6 @@ async def save_product_model(
                 "Нельзя сохранить модель без названия модели."
             )
 
-        # ----------------------------------------------------
-        # Ищем существующую запись.
-        #
-        # IS NOT DISTINCT FROM нужен для корректной
-        # обработки NULL в source_url.
-        # ----------------------------------------------------
-
         existing_id = await conn.fetchval(
             """
             SELECT id
@@ -943,10 +949,6 @@ async def save_product_model(
             model_name,
             source_url,
         )
-
-        # ----------------------------------------------------
-        # Если запись уже существует — обновляем её.
-        # ----------------------------------------------------
 
         if existing_id is not None:
 
@@ -982,10 +984,6 @@ async def save_product_model(
             )
 
             return existing_id
-
-        # ----------------------------------------------------
-        # Если модели ещё нет — создаём.
-        # ----------------------------------------------------
 
         new_id = await conn.fetchval(
             """
@@ -1064,11 +1062,6 @@ async def get_product_models(
 
             model = dict(row)
 
-            # asyncpg обычно возвращает JSONB
-            # уже как Python-объект.
-            # Но оставляем совместимость
-            # со старыми драйверами/данными.
-
             if isinstance(
                 model.get("specifications"),
                 str,
@@ -1109,9 +1102,6 @@ async def select_product_model(
 
         async with conn.transaction():
 
-            # Сначала снимаем выбор со всех моделей
-            # этой позиции.
-
             await conn.execute(
                 """
                 UPDATE product_models
@@ -1121,8 +1111,6 @@ async def select_product_model(
                 """,
                 tender_item_id,
             )
-
-            # Затем выбираем одну конкретную модель.
 
             await conn.execute(
                 """
