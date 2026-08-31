@@ -246,20 +246,55 @@ async def search_tender_models(callback: CallbackQuery):
     tender_id = int(callback.data.split("_")[1])
     items = await db.get_tender_items(tender_id)
     
-    await callback.message.edit_text(f"🔍 Ищу модели для {len(items)} позиций...\nЭто может занять несколько минут.")
+    # Проверяем сколько позиций уже имеют модели
+    items_with_models = 0
+    for item in items:
+        existing_models = await db.get_models(item['id'])
+        if existing_models:
+            items_with_models += 1
+    
+    # Если уже есть модели — предлагаем обновить
+    if items_with_models > 0:
+        await callback.answer(
+            f"⚠️ Найдены модели для {items_with_models} позиций.\n"
+            "Повторный поиск может дать другие результаты.\n"
+            "Продолжить?",
+            show_alert=True
+        )
+        # Можно добавить кнопку подтверждения, но пока продолжаем
+    
+    await callback.message.edit_text(f"🔍 Ищу модели для {len(items)} позиций...\nЭто может занять 2-5 минут.")
     
     found_count = 0
-    for item in items:
+    for idx, item in enumerate(items, 1):
+        # Пропускаем если уже есть модели (для ускорения)
+        existing = await db.get_models(item['id'])
+        if existing:
+            found_count += len(existing)
+            continue
+        
         models = await search_models(item, region=None, max_models=10)
         if models:
             await db.save_models(item['id'], models)
             found_count += len(models)
-        await asyncio.sleep(1)  # задержка между запросами
+        
+        # Обновляем прогресс каждые 3 позиции
+        if idx % 3 == 0:
+            try:
+                await callback.message.edit_text(
+                    f"🔍 Обработано {idx}/{len(items)} позиций...\n"
+                    f"Найдено моделей: {found_count}"
+                )
+            except:
+                pass
+        
+        await asyncio.sleep(2)  # увеличил задержку до 2 сек
     
     await callback.message.edit_text(
         f"✅ Поиск завершен!\n\n"
-        f"Найдено моделей: {found_count}\n\n"
-        f"Теперь выберите позицию для просмотра найденных моделей.",
+        f"Найдено моделей: {found_count}\n"
+        f"Для {len(items)} позиций\n\n"
+        "Выберите позицию для просмотра найденных моделей.",
         reply_markup=tender_actions(tender_id)
     )
     await callback.answer()
