@@ -168,8 +168,6 @@ async def _extract_model(page_text: str) -> dict | None:
     except Exception as exc:
         print(f"[model_search] model extraction error: {exc}", flush=True)
         return None
-
-
 async def search_models(item: dict | str, region: str | None = None, max_models: int = 12) -> list[dict]:
     if isinstance(item, str):
         item = {"name": item, "requirements": []}
@@ -178,14 +176,14 @@ async def search_models(item: dict | str, region: str | None = None, max_models:
     candidates = []
     seen_urls = set()
     for query in build_model_queries(item, region):
-        for result in await _search(query, max_results=8):
+        for result in await _search(query, max_results=15):  # увеличил с 8 до 15
             if result["url"] in seen_urls:
                 continue
             seen_urls.add(result["url"])
             candidates.append(result)
-            if len(candidates) >= max_models * 2:
+            if len(candidates) >= max_models * 3:  # увеличил с *2 до *3
                 break
-        if len(candidates) >= max_models * 2:
+        if len(candidates) >= max_models * 3:
             break
 
     models = []
@@ -208,4 +206,6 @@ async def search_models(item: dict | str, region: str | None = None, max_models:
             if len(models) >= max_models:
                 break
 
+    print(f"[search_models] обработано {len(candidates)} кандидатов, найдено {len(models)} моделей", flush=True)
     return models
+
