@@ -1,12 +1,11 @@
 import asyncpg
 from config.settings import DATABASE_URL
-from bot import database as db
 
 async def add_supplier(name: str, inn: str, contact: str, region: str, margin: float, user_id: int) -> int:
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         supplier_id = await conn.fetchval(
-            """INSERT INTO suppliers (name, inn, contact_person, region, default_margin, user_id)
+            """INSERT INTO suppliers (name, inn, contact_person, city, default_margin, user_id)
                VALUES ($1, $2, $3, $4, $5, $6) RETURNING id""",
             name, inn, contact, region, margin, user_id
         )
@@ -18,7 +17,7 @@ async def get_suppliers(user_id: int) -> list[dict]:
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         rows = await conn.fetch(
-            """SELECT id, name, inn, contact_person, region, default_margin 
+            """SELECT id, name, inn, contact_person, city, default_margin 
                FROM suppliers 
                WHERE user_id = $1 
                ORDER BY name""",
