@@ -15,8 +15,8 @@ def tender_actions(tender_id: int):
         [InlineKeyboardButton(text="📝 Просмотр позиций", callback_data=f"view_{tender_id}")],
         [InlineKeyboardButton(text="🔍 Найти модели", callback_data=f"search_{tender_id}")],
         [InlineKeyboardButton(text="💼 Генерация КП", callback_data=f"cp_{tender_id}")],
-        [InlineKeyboardButton(text="📥 Экспорт", callback_data=f"export_{tender_id}")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{tender_id}")]
+        [InlineKeyboardButton(text="📥 Экспорт", callback_data=f"show_export_{tender_id}")],  # изменил на show_export_
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_tender_{tender_id}")]  # добавил _tender_
     ])
 
 def item_actions(tender_id: int, item_id: int):
