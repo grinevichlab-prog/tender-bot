@@ -168,6 +168,7 @@ CREATE TABLE IF NOT EXISTS tender_documents (
     is_useful BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT NOW()
 );
+
 """
 
 
@@ -176,6 +177,58 @@ CREATE TABLE IF NOT EXISTS tender_documents (
 # ============================================================
 
 async def init_db():
+            # Таблица поставщиков
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS suppliers (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                name TEXT NOT NULL,
+                inn TEXT,
+                contact_person TEXT,
+                phone TEXT,
+                email TEXT,
+                region TEXT,
+                default_margin FLOAT DEFAULT 1.2,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # Таблица найденных моделей
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS models (
+                id SERIAL PRIMARY KEY,
+                tender_item_id INTEGER REFERENCES tender_items(id) ON DELETE CASCADE,
+                manufacturer TEXT,
+                model TEXT,
+                product_name TEXT,
+                specifications JSONB,
+                price FLOAT,
+                currency TEXT DEFAULT 'RUB',
+                availability TEXT,
+                source_url TEXT,
+                source_title TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # Таблица коммерческих предложений
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS commercial_offers (
+                id SERIAL PRIMARY KEY,
+                tender_id INTEGER REFERENCES tenders(id) ON DELETE CASCADE,
+                supplier_id INTEGER REFERENCES suppliers(id) ON DELETE CASCADE,
+                data JSONB NOT NULL,
+                total_amount FLOAT,
+                status TEXT DEFAULT 'draft',
+                created_at TIMESTAMP DEFAULT NOW(),
+                sent_at TIMESTAMP
+            )
+        """)
+        
+        # Индексы
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_suppliers_user ON suppliers(user_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_models_item ON models(tender_item_id)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_co_tender ON commercial_offers(tender_id)")
     async with pool.acquire() as conn:
 
         await conn.execute(CREATE_TABLES_SQL)
