@@ -53,7 +53,7 @@ async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
     
     # Если поставщиков нет - запускаем автопоиск
     if not suppliers:
-        await callback.message.edit_text("🔍 Поставщиков нет. Запускаю автопоиск...\nЭто займет 1-2 минуты.")
+        await callback.message.edit_text("🔍 Поставщиков нет в базе. Запускаю автопоиск...\nЭто займет 1-2 минуты.")
         
         # Получаем название тендера
         tender = await db.get_tender(tender_id)
@@ -61,10 +61,17 @@ async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Тендер не найден", show_alert=True)
             return
         
-        tender_name = tender.get('name', 'товары')
+        # Получаем первую позицию для формирования запроса
+        items = await db.get_tender_items(tender_id)
+        if not items:
+            await callback.answer("Позиции тендера не найдены", show_alert=True)
+            return
+        
+        # Формируем поисковый запрос из первой позиции
+        search_query = items[0].get('name', tender.get('name', 'товары'))
         
         # Ищем поставщиков
-        found_suppliers = await search_suppliers_for_tender(tender_name, region="Москва", max_suppliers=5)
+        found_suppliers = await search_suppliers_web(search_query, max_results=5)
         
         if not found_suppliers:
             await callback.message.edit_text(
@@ -75,20 +82,41 @@ async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
             return
         
         # Добавляем найденных поставщиков в БД
+        added_count = 0
         for s_info in found_suppliers:
-            await add_supplier(
-                name=s_info.get('company_name', 'Неизвестно'),
-                inn=s_info.get('inn', ''),
-                contact=f"{s_info.get('contact_person', '')} {s_info.get('phone', '')}".strip(),
-                region=s_info.get('city', 'Москва'),
-                margin=1.25,  # наценка по умолчанию 25%
-                user_id=user_id
+            try:
+                contact_parts = []
+                if s_info.get('phone'):
+                    contact_parts.append(s_info['phone'])
+                if s_info.get('email'):
+                    contact_parts.append(s_info['email'])
+                contact = " | ".join(contact_parts) if contact_parts else "Не указано"
+                
+                await add_supplier(
+                    name=s_info.get('name', 'Неизвестно')[:100],
+                    inn='0000000000',
+                    contact=contact[:200],
+                    region='Москва',
+                    margin=1.25,
+                    user_id=user_id
+                )
+                added_count += 1
+                logger.info(f"[generate_cp_start] Добавлен поставщик: {s_info.get('name')}")
+            except Exception as e:
+                logger.warning(f"[generate_cp_start] Не удалось добавить поставщика {s_info.get('name')}: {e}")
+        
+        if added_count == 0:
+            await callback.message.edit_text(
+                "❌ Не удалось добавить поставщиков.\n\n"
+                "Добавьте поставщика вручную через /add_supplier"
             )
+            await callback.answer()
+            return
         
         suppliers = await get_suppliers(user_id)
         
         await callback.message.edit_text(
-            f"✅ Найдено {len(suppliers)} поставщиков!\n\n"
+            f"✅ Найдено и добавлено {added_count} поставщиков!\n\n"
             "Выберите поставщика для КП:"
         )
     
