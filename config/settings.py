@@ -5,6 +5,7 @@ load_dotenv()
 
 # --- Telegram ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+BOT_TOKEN = TELEGRAM_TOKEN  # алиас для совместимости
 
 # --- YandexGPT ---
 YANDEX_MAPS_API_KEY = os.getenv("YANDEX_MAPS_API_KEY")
