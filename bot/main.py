@@ -240,7 +240,7 @@ async def show_export_menu(callback: CallbackQuery):
     await callback.answer()
 
 @router.callback_query(F.data.startswith("delete_tender_"))
-async def delete_tender(callback: CallbackQuery):
+async def delete_tender_handler(callback: CallbackQuery):
     tender_id = int(callback.data.split("_")[2])
     await db.delete_tender(tender_id)
     await callback.message.edit_text("🗑 Тендер удален.")
@@ -259,14 +259,6 @@ async def refresh_search_models(callback: CallbackQuery):
     
     await callback.answer("Старые результаты очищены, запускаю поиск заново", show_alert=True)
     
-    callback.data = f"search_{tender_id}"
-    await search_tender_models(callback)
-
-@router.callback_query(F.data.startswith("search_"))
-async def search_tender_models(callback: CallbackQuery):
-    tender_id = int(callback.data.split("_")[1])
-    items = await db.get_tender_items(tender_id)
-    
     items_count = len(items)
     items_word = _plural(items_count, ("позиции", "позиций", "позиций"))
     
@@ -274,6 +266,53 @@ async def search_tender_models(callback: CallbackQuery):
         f"🔍 Ищу модели для {items_count} {items_word}...\n"
         f"Это может занять от 2 до 5 минут."
     )
+    
+    found_count = 0
+    processed_items = []
+    
+    for idx, item in enumerate(items, 1):
+        logger.info(f"[refresh_search] Ищу модели для позиции {idx}: {item['name']}")
+        
+        models = await search_models(item, region=None, max_models=10)
+        
+        if models:
+            await db.save_models(item['id'], models)
+            found_count += len(models)
+            processed_items.append({
+                'name': item['name'][:40],
+                'models_count': len(models),
+                'match': "✅ Найдено"
+            })
+            logger.info(f"[refresh_search] Найдено {len(models)} моделей")
+        else:
+            logger.warning(f"[refresh_search] Модели не найдены")
+            processed_items.append({
+                'name': item['name'][:40],
+                'models_count': 0,
+                'match': "❌ Не найдено"
+            })
+        
+        if idx % 2 == 0 or idx == items_count:
+            try:
+                progress_text = f"🔍 Обработано {idx}/{items_count}\nНайдено: {found_count}\n\n"
+                for pi in processed_items[-3:]:
+                    progress_text += f"• {pi['name']}: {pi['models_count']} {pi['match']}\n"
+                await callback.message.edit_text(progress_text)
+            except:
+                pass
+        
+        await asyncio.sleep(2)
+    
+    await callback.message.edit_text(
+        f"✅ Поиск завершен!\n\n"
+        f"Обработано: {items_count}\n"
+        f"Найдено моделей: {found_count}",
+        reply_markup=tender_actions(tender_id)
+    )
+
+@router.callback_query(F.data.startswith("search_"))
+async def search_tender_models(callback: CallbackQuery):
+    # ... остальной код без изменений
     
     found_count = 0
     processed_items = []
