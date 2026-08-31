@@ -529,6 +529,10 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     
+    # Создаем pool перед init_db
+    pool = await db.create_pool()
+    await db.set_pool(pool)
+    
     await db.init_db()
     logger.info("База данных инициализирована")
     
