@@ -442,8 +442,29 @@ async def supplier_margin_received(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("cp_"))
 async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
-    logger.info(f"[generate_cp_start] callback_data: {callback.data}")  # ← добавь эту строку
+    logger.info(f"[generate_cp_start] triggered, callback_data={callback.data}")  # ← добавь
     tender_id = int(callback.data.split("_")[1])
+    
+    user_id = await db.get_or_create_user(
+        telegram_id=callback.from_user.id,
+        name=callback.from_user.full_name or "User"
+    )
+    
+    logger.info(f"[generate_cp_start] user_id={user_id}, tender_id={tender_id}")  # ← добавь
+    
+    suppliers = await get_suppliers(user_id)
+    
+    if not suppliers:
+        await callback.answer("Сначала добавьте поставщика через /add_supplier", show_alert=True)
+        return
+    
+    text = "👥 Выберите поставщика для КП:\n\n"
+    for s in suppliers:
+        text += f"/supplier_{s['id']} - {s['name']} (наценка {s.get('default_margin', 1.2):.0%})\n"
+    
+    await state.update_data(tender_id=tender_id)
+    await callback.message.edit_text(text)
+    await callback.answer()
     
     # Получаем user_id
     user_id = await db.get_or_create_user(
