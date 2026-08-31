@@ -323,14 +323,21 @@ async def delete_tender(callback: CallbackQuery):
     await callback.answer()
 
 # ============ ПОИСК МОДЕЛЕЙ ============
-
-@router.callback_query(F.data.startswith("search_"))
-async def search_tender_models(callback: CallbackQuery):
-    tender_id = int(callback.data.split("_")[1])
+@router.callback_query(F.data.startswith("refresh_search_"))
+async def refresh_search_models(callback: CallbackQuery):
+    """Очищает старые результаты и ищет заново"""
+    tender_id = int(callback.data.split("_")[2])
     items = await db.get_tender_items(tender_id)
     
-    items_count = len(items)
-    items_word = _plural(items_count, ("позиции", "позиций", "позиций"))
+    # Удаляем все старые модели
+    for item in items:
+        await db.delete_models(item['id'])
+    
+    await callback.answer("Старые результаты очищены, запускаю поиск заново", show_alert=True)
+    
+    # Перенаправляем на обычный поиск
+    callback.data = f"search_{tender_id}"
+    await search_tender_models(callback)
     
     # Проверяем сколько позиций уже имеют модели
     items_with_models = 0
