@@ -230,7 +230,21 @@ async def delete_tender(callback: CallbackQuery):
     await db.delete_tender(tender_id)
     await callback.message.edit_text("🗑 Тендер удален.")
     await callback.answer()
+@router.callback_query(F.data.startswith("show_export_"))
+async def show_export_menu(callback: CallbackQuery):
+    tender_id = int(callback.data.split("_")[2])
+    await callback.message.edit_text(
+        "📥 Выберите формат экспорта:",
+        reply_markup=export_format(tender_id)
+    )
+    await callback.answer()
 
+@router.callback_query(F.data.startswith("delete_tender_"))
+async def delete_tender(callback: CallbackQuery):
+    tender_id = int(callback.data.split("_")[2])
+    await db.delete_tender(tender_id)
+    await callback.message.edit_text("🗑 Тендер удален.")
+    await callback.answer()
 # ============ ПОИСК МОДЕЛЕЙ ============
 
 @router.callback_query(F.data.startswith("search_"))
