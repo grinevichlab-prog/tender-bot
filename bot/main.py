@@ -17,6 +17,7 @@ from bot.ai_analyzer import analyze_tender_document, merge_analyses
 from bot.parser import extract_text
 from bot.model_search import search_models
 from bot.supplier_manager import add_supplier, get_suppliers, get_supplier, update_supplier, delete_supplier
+from bot.supplier_search import search_suppliers_web
 from bot.cp_generator import generate_cp, get_cp, list_cps
 from bot.excel_export import export_tender_to_excel, export_cp_to_excel
 from bot.word_export import export_cp_to_word
