@@ -2,6 +2,7 @@ import asyncpg
 from config.settings import DATABASE_URL
 from datetime import datetime
 import uuid
+import json
 
 pool = None
 
@@ -28,11 +29,9 @@ async def init_db():
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
-                number TEXT,
                 region TEXT,
                 chat_id TEXT,
                 thread_id TEXT,
-                raw_analysis JSONB,
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -45,7 +44,6 @@ async def init_db():
                 name TEXT NOT NULL,
                 quantity NUMERIC,
                 unit TEXT,
-                estimated_price NUMERIC,
                 requirements JSONB,
                 selected_model_id INTEGER,
                 created_at TIMESTAMP DEFAULT NOW()
@@ -97,7 +95,10 @@ async def init_db():
         
         print("Таблицы БД проверены/созданы.", flush=True)
 
+# ============ USERS ============
+
 async def get_or_create_user(telegram_id: int, name: str) -> int:
+    """Получает или создает пользователя"""
     async with pool.acquire() as conn:
         user = await conn.fetchrow("SELECT id FROM users WHERE telegram_id = $1", telegram_id)
         if user:
@@ -107,6 +108,8 @@ async def get_or_create_user(telegram_id: int, name: str) -> int:
             telegram_id, name
         )
         return user_id
+
+# ============ TENDERS ============
 
 async def create_tender(user_id: int, name: str, number: str | None, region: str | None) -> int:
     """Создает новый тендер с уникальным thread_id"""
@@ -129,6 +132,7 @@ async def get_tender(tender_id: int) -> dict | None:
         return dict(row) if row else None
 
 async def get_user_tenders(user_id: int) -> list[dict]:
+    """Получает все тендеры пользователя"""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, name, created_at FROM tenders WHERE user_id = $1 ORDER BY created_at DESC",
@@ -137,35 +141,31 @@ async def get_user_tenders(user_id: int) -> list[dict]:
         return [dict(r) for r in rows]
 
 async def delete_tender(tender_id: int):
+    """Удаляет тендер"""
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM tenders WHERE id = $1", tender_id)
 
-async def update_tender_analysis(tender_id: int, analysis: dict):
-    import json
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE tenders SET raw_analysis = $1 WHERE id = $2",
-            json.dumps(analysis, ensure_ascii=False), tender_id
-        )
+# ============ TENDER ITEMS ============
 
 async def sync_tender_items(tender_id: int, items: list[dict]):
+    """Синхронизирует позиции тендера"""
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM tender_items WHERE tender_id = $1", tender_id)
         for item in items:
             await conn.execute(
                 """INSERT INTO tender_items 
-                   (tender_id, position_number, name, quantity, unit, estimated_price, requirements)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+                   (tender_id, position_number, name, quantity, unit, requirements)
+                   VALUES ($1, $2, $3, $4, $5, $6)""",
                 tender_id,
                 item.get('position_number'),
                 item.get('name'),
                 item.get('quantity'),
                 item.get('unit'),
-                item.get('estimated_price'),
-                item.get('requirements')
+                json.dumps(item.get('requirements'), ensure_ascii=False) if item.get('requirements') else None
             )
 
 async def get_tender_items(tender_id: int) -> list[dict]:
+    """Получает все позиции тендера с выбранными моделями"""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT ti.*, m.manufacturer, m.model 
@@ -175,10 +175,21 @@ async def get_tender_items(tender_id: int) -> list[dict]:
                ORDER BY ti.position_number""",
             tender_id
         )
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            item = dict(r)
+            if item.get('requirements') and isinstance(item['requirements'], str):
+                try:
+                    item['requirements'] = json.loads(item['requirements'])
+                except:
+                    pass
+            result.append(item)
+        return result
+
+# ============ MODELS ============
 
 async def save_models(tender_item_id: int, models: list[dict]):
-    import json
+    """Сохраняет найденные модели для позиции"""
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM models WHERE tender_item_id = $1", tender_item_id)
         for m in models:
@@ -202,12 +213,22 @@ async def save_models(tender_item_id: int, models: list[dict]):
             )
 
 async def get_models(tender_item_id: int) -> list[dict]:
+    """Получает все найденные модели для позиции"""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT * FROM models WHERE tender_item_id = $1 ORDER BY created_at",
             tender_item_id
         )
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            model = dict(r)
+            if model.get('specifications') and isinstance(model['specifications'], str):
+                try:
+                    model['specifications'] = json.loads(model['specifications'])
+                except:
+                    pass
+            result.append(model)
+        return result
 
 async def delete_models(tender_item_id: int):
     """Удаляет все найденные модели для позиции"""
@@ -215,8 +236,74 @@ async def delete_models(tender_item_id: int):
         await conn.execute("DELETE FROM models WHERE tender_item_id = $1", tender_item_id)
 
 async def select_model(tender_item_id: int, model_id: int):
+    """Выбирает модель для позиции"""
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE tender_items SET selected_model_id = $1 WHERE id = $2",
             model_id, tender_item_id
         )
+
+# ============ SUPPLIERS ============
+
+async def get_suppliers(user_id: int) -> list[dict]:
+    """Получает всех поставщиков пользователя"""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, name, inn, contact_person, city, default_margin 
+               FROM suppliers 
+               WHERE user_id = $1 
+               ORDER BY name""",
+            user_id
+        )
+        return [dict(r) for r in rows]
+
+async def get_supplier(supplier_id: int) -> dict | None:
+    """Получает поставщика по ID"""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM suppliers WHERE id = $1", 
+            supplier_id
+        )
+        return dict(row) if row else None
+
+# ============ COMMERCIAL OFFERS ============
+
+async def save_commercial_offer(tender_id: int, supplier_id: int, data: dict, total_amount: float) -> int:
+    """Сохраняет коммерческое предложение"""
+    async with pool.acquire() as conn:
+        cp_id = await conn.fetchval(
+            """INSERT INTO commercial_offers (tender_id, supplier_id, data, total_amount, created_at)
+               VALUES ($1, $2, $3, $4, NOW())
+               RETURNING id""",
+            tender_id, supplier_id, json.dumps(data, ensure_ascii=False), total_amount
+        )
+        return cp_id
+
+async def get_commercial_offer(cp_id: int) -> dict | None:
+    """Получает КП по ID"""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM commercial_offers WHERE id = $1",
+            cp_id
+        )
+        if not row:
+            return None
+        result = dict(row)
+        if result.get('data') and isinstance(result['data'], str):
+            try:
+                result['data'] = json.loads(result['data'])
+            except:
+                pass
+        return result
+
+async def list_commercial_offers(tender_id: int) -> list[dict]:
+    """Получает все КП для тендера"""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, supplier_id, total_amount, created_at 
+               FROM commercial_offers 
+               WHERE tender_id = $1 
+               ORDER BY created_at DESC""",
+            tender_id
+        )
+        return [dict(r) for r in rows]
