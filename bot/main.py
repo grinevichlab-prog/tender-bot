@@ -257,21 +257,21 @@ async def handle_attachment(message: Message, bot: Bot):
                 await status_msg.edit_text("⚠️ Не удалось извлечь номенклатуру из документов.")
                 return
             
-            await status_msg.edit_text(f"💾 Сохраняю {len(items)} позиций в БД...")
-            
-            # Создаем тендер с правильным user_id
-            tender_id = await db.create_tender(
-                user_id=user_id,
-                name=doc.file_name.replace('.zip', ''),
-                number=None,
-                region=None
-            )
-            
-            # Сохраняем анализ
-            await db.update_tender_analysis(tender_id, analysis)
-            
-            # Сохраняем позиции
-            await db.sync_tender_items(tender_id, items)
+          await status_msg.edit_text(f"💾 Сохраняю {len(items)} позиций в БД...")
+
+# Создаем тендер с правильным user_id
+tender_id = await db.create_tender(
+    user_id=user_id,
+    name=doc.file_name.replace('.zip', ''),
+    number=None,
+    region=None
+)
+
+# Сохраняем анализ - УБРАЛИ
+# await db.update_tender_analysis(tender_id, analysis)
+
+# Сохраняем позиции
+await db.sync_tender_items(tender_id, items)
             
             await status_msg.delete()
             await message.answer(
