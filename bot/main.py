@@ -407,6 +407,7 @@ async def supplier_margin_received(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("cp_"))
 async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
+    logger.info(f"[generate_cp_start] callback_data: {callback.data}")  # ← добавь эту строку
     tender_id = int(callback.data.split("_")[1])
     
     # Получаем user_id
@@ -428,7 +429,6 @@ async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
     await state.update_data(tender_id=tender_id)
     await callback.message.edit_text(text)
     await callback.answer()
-
 @router.message(F.text.regexp(r"^/supplier_(\d+)$"))
 async def supplier_selected(message: Message, state: FSMContext):
     supplier_id = int(message.text.split("_")[1])
