@@ -31,6 +31,73 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 router = Router()
+from bot.supplier_search import search_suppliers_for_tender
+
+@router.callback_query(F.data.startswith("generate_cp_"))
+async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
+    logger.info(f"[generate_cp_start] triggered, callback_data={callback.data}")
+    tender_id = int(callback.data.split("_")[2])
+    
+    # Получаем user_id
+    user_id = await db.get_or_create_user(
+        telegram_id=callback.from_user.id,
+        name=callback.from_user.full_name or "User"
+    )
+    
+    logger.info(f"[generate_cp_start] user_id={user_id}, tender_id={tender_id}")
+    
+    suppliers = await get_suppliers(user_id)
+    
+    logger.info(f"[generate_cp_start] found {len(suppliers)} suppliers")
+    
+    # Если поставщиков нет - запускаем автопоиск
+    if not suppliers:
+        await callback.message.edit_text("🔍 Поставщиков нет. Запускаю автопоиск...\nЭто займет 1-2 минуты.")
+        
+        # Получаем название тендера
+        tender = await db.get_tender(tender_id)
+        if not tender:
+            await callback.answer("Тендер не найден", show_alert=True)
+            return
+        
+        tender_name = tender.get('name', 'товары')
+        
+        # Ищем поставщиков
+        found_suppliers = await search_suppliers_for_tender(tender_name, region="Москва", max_suppliers=5)
+        
+        if not found_suppliers:
+            await callback.message.edit_text(
+                "❌ Поставщики не найдены автоматически.\n\n"
+                "Добавьте поставщика вручную через /add_supplier"
+            )
+            await callback.answer()
+            return
+        
+        # Добавляем найденных поставщиков в БД
+        for s_info in found_suppliers:
+            await add_supplier(
+                name=s_info.get('company_name', 'Неизвестно'),
+                inn=s_info.get('inn', ''),
+                contact=f"{s_info.get('contact_person', '')} {s_info.get('phone', '')}".strip(),
+                region=s_info.get('city', 'Москва'),
+                margin=1.25,  # наценка по умолчанию 25%
+                user_id=user_id
+            )
+        
+        suppliers = await get_suppliers(user_id)
+        
+        await callback.message.edit_text(
+            f"✅ Найдено {len(suppliers)} поставщиков!\n\n"
+            "Выберите поставщика для КП:"
+        )
+    
+    text = "👥 Выберите поставщика для КП:\n\n"
+    for s in suppliers:
+        text += f"/supplier_{s['id']} - {s['name']} (наценка {s.get('default_margin', 1.2):.0%})\n"
+    
+    await state.update_data(tender_id=tender_id)
+    await callback.message.edit_text(text)
+    await callback.answer()
 
 # ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
 
