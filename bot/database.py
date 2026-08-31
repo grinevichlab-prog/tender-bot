@@ -31,7 +31,10 @@ async def create_pool():
 async def set_pool(p):
     global pool
     pool = p
-
+async def get_tender(tender_id: int) -> dict | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM tenders WHERE id = $1", tender_id)
+        return dict(row) if row else None
 
 # ============================================================
 # СОЗДАНИЕ ТАБЛИЦ
