@@ -56,10 +56,10 @@ async def generate_cp(tender_id: int, supplier_id: int, delivery_days: int, paym
         delivery_date = datetime.now() + timedelta(days=delivery_days)
         
         cp_data = {
-            "tender_name": tender.get('name') or f"Тендер #{tender_id}",
-            "tender_number": tender.get('number'),
-            "supplier_name": supplier.get('name'),
-            "supplier_inn": supplier.get('inn'),
+    "tender_name": tender.get('name') or f"Тендер #{tender_id}",
+    "tender_number": tender.get('name', ''),  # используем name вместо number
+    "supplier_name": supplier.get('name'),
+    "supplier_inn": supplier.get('inn'),
             "contact": supplier.get('contact_person'),
             "items": cp_items,
             "total": round(total, 2),
