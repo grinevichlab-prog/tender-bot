@@ -32,101 +32,6 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
 router = Router()
-from bot.supplier_search import search_suppliers_web
-
-@router.callback_query(F.data.startswith("generate_cp_"))
-async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
-    logger.info(f"[generate_cp_start] triggered, callback_data={callback.data}")
-    tender_id = int(callback.data.split("_")[2])
-    
-    # Получаем user_id
-    user_id = await db.get_or_create_user(
-        telegram_id=callback.from_user.id,
-        name=callback.from_user.full_name or "User"
-    )
-    
-    logger.info(f"[generate_cp_start] user_id={user_id}, tender_id={tender_id}")
-    
-    suppliers = await get_suppliers(user_id)
-    
-    logger.info(f"[generate_cp_start] found {len(suppliers)} suppliers")
-    
-    # Если поставщиков нет - запускаем автопоиск
-    if not suppliers:
-        await callback.message.edit_text("🔍 Поставщиков нет в базе. Запускаю автопоиск...\nЭто займет 1-2 минуты.")
-        
-        # Получаем название тендера
-        tender = await db.get_tender(tender_id)
-        if not tender:
-            await callback.answer("Тендер не найден", show_alert=True)
-            return
-        
-        # Получаем первую позицию для формирования запроса
-        items = await db.get_tender_items(tender_id)
-        if not items:
-            await callback.answer("Позиции тендера не найдены", show_alert=True)
-            return
-        
-        # Формируем поисковый запрос из первой позиции
-        search_query = items[0].get('name', tender.get('name', 'товары'))
-        
-        # Ищем поставщиков
-        found_suppliers = await search_suppliers_web(search_query, max_results=5)
-        
-        if not found_suppliers:
-            await callback.message.edit_text(
-                "❌ Поставщики не найдены автоматически.\n\n"
-                "Добавьте поставщика вручную через /add_supplier"
-            )
-            await callback.answer()
-            return
-        
-        # Добавляем найденных поставщиков в БД
-        added_count = 0
-        for s_info in found_suppliers:
-            try:
-                contact_parts = []
-                if s_info.get('phone'):
-                    contact_parts.append(s_info['phone'])
-                if s_info.get('email'):
-                    contact_parts.append(s_info['email'])
-                contact = " | ".join(contact_parts) if contact_parts else "Не указано"
-                
-                await add_supplier(
-                    name=s_info.get('name', 'Неизвестно')[:100],
-                    inn='0000000000',
-                    contact=contact[:200],
-                    region='Москва',
-                    margin=1.25,
-                    user_id=user_id
-                )
-                added_count += 1
-                logger.info(f"[generate_cp_start] Добавлен поставщик: {s_info.get('name')}")
-            except Exception as e:
-                logger.warning(f"[generate_cp_start] Не удалось добавить поставщика {s_info.get('name')}: {e}")
-        
-        if added_count == 0:
-            await callback.message.edit_text(
-                "❌ Не удалось добавить поставщиков.\n\n"
-                "Добавьте поставщика вручную через /add_supplier"
-            )
-            await callback.answer()
-            return
-        
-        suppliers = await get_suppliers(user_id)
-        
-        await callback.message.edit_text(
-            f"✅ Найдено и добавлено {added_count} поставщиков!\n\n"
-            "Выберите поставщика для КП:"
-        )
-    
-    text = "👥 Выберите поставщика для КП:\n\n"
-    for s in suppliers:
-        text += f"/supplier_{s['id']} - {s['name']} (наценка {s.get('default_margin', 1.2):.0%})\n"
-    
-    await state.update_data(tender_id=tender_id)
-    await callback.message.edit_text(text)
-    await callback.answer()
 
 # ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
 
@@ -146,7 +51,6 @@ def _plural(num: int, forms: tuple) -> str:
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
-    # Создаем пользователя если его нет
     user_id = await db.get_or_create_user(
         telegram_id=message.from_user.id,
         name=message.from_user.full_name or "User"
@@ -206,7 +110,6 @@ async def handle_attachment(message: Message, bot: Bot):
     
     status_msg = await message.answer("⏳ Скачиваю файл...")
     
-    # Создаем/получаем пользователя
     user_id = await db.get_or_create_user(
         telegram_id=message.from_user.id,
         name=message.from_user.full_name or "User"
@@ -248,7 +151,6 @@ async def handle_attachment(message: Message, bot: Bot):
             
             await status_msg.edit_text(f"🤖 Анализирую {sum(len(t) for t in texts)} символов через YandexGPT...")
             
-            # Объединяем тексты и анализируем
             full_text = "\n\n".join(texts)
             analysis = await analyze_tender_document(full_text)
             
@@ -257,21 +159,16 @@ async def handle_attachment(message: Message, bot: Bot):
                 await status_msg.edit_text("⚠️ Не удалось извлечь номенклатуру из документов.")
                 return
             
-          await status_msg.edit_text(f"💾 Сохраняю {len(items)} позиций в БД...")
-
-# Создаем тендер с правильным user_id
-tender_id = await db.create_tender(
-    user_id=user_id,
-    name=doc.file_name.replace('.zip', ''),
-    number=None,
-    region=None
-)
-
-# Сохраняем анализ - УБРАЛИ
-# await db.update_tender_analysis(tender_id, analysis)
-
-# Сохраняем позиции
-await db.sync_tender_items(tender_id, items)
+            await status_msg.edit_text(f"💾 Сохраняю {len(items)} позиций в БД...")
+            
+            tender_id = await db.create_tender(
+                user_id=user_id,
+                name=doc.file_name.replace('.zip', ''),
+                number=None,
+                region=None
+            )
+            
+            await db.sync_tender_items(tender_id, items)
             
             await status_msg.delete()
             await message.answer(
@@ -292,7 +189,6 @@ await db.sync_tender_items(tender_id, items)
 
 @router.message(F.text == "📋 Мои тендеры")
 async def list_tenders(message: Message):
-    # Получаем user_id из таблицы users
     user_id = await db.get_or_create_user(
         telegram_id=message.from_user.id,
         name=message.from_user.full_name or "User"
@@ -351,37 +247,28 @@ async def delete_tender(callback: CallbackQuery):
     await callback.answer()
 
 # ============ ПОИСК МОДЕЛЕЙ ============
+
 @router.callback_query(F.data.startswith("refresh_search_"))
 async def refresh_search_models(callback: CallbackQuery):
     """Очищает старые результаты и ищет заново"""
     tender_id = int(callback.data.split("_")[2])
     items = await db.get_tender_items(tender_id)
     
-    # Удаляем все старые модели
     for item in items:
         await db.delete_models(item['id'])
     
     await callback.answer("Старые результаты очищены, запускаю поиск заново", show_alert=True)
     
-    # Перенаправляем на обычный поиск
     callback.data = f"search_{tender_id}"
     await search_tender_models(callback)
+
+@router.callback_query(F.data.startswith("search_"))
+async def search_tender_models(callback: CallbackQuery):
+    tender_id = int(callback.data.split("_")[1])
+    items = await db.get_tender_items(tender_id)
     
-    # Проверяем сколько позиций уже имеют модели
-    items_with_models = 0
-    for item in items:
-        existing_models = await db.get_models(item['id'])
-        if existing_models:
-            items_with_models += 1
-    
-    # Если уже есть модели — предлагаем обновить
-    if items_with_models > 0:
-        await callback.answer(
-            f"⚠️ Найдены модели для {items_with_models} {_plural(items_with_models, ('позиции', 'позиций', 'позиций'))}.\n"
-            "Повторный поиск может дать другие результаты.\n"
-            "Продолжить?",
-            show_alert=True
-        )
+    items_count = len(items)
+    items_word = _plural(items_count, ("позиции", "позиций", "позиций"))
     
     await callback.message.edit_text(
         f"🔍 Ищу модели для {items_count} {items_word}...\n"
@@ -392,10 +279,14 @@ async def refresh_search_models(callback: CallbackQuery):
     processed_items = []
     
     for idx, item in enumerate(items, 1):
-        # Пропускаем если уже есть модели
         existing = await db.get_models(item['id'])
         if existing:
             found_count += len(existing)
+            processed_items.append({
+                'name': item['name'][:40],
+                'models_count': len(existing),
+                'match': "✅ Уже найдено"
+            })
             continue
         
         logger.info(f"[search_models] Ищу модели для позиции {idx}: {item['name']}")
@@ -406,11 +297,9 @@ async def refresh_search_models(callback: CallbackQuery):
             await db.save_models(item['id'], models)
             found_count += len(models)
             
-            # Анализируем соответствие (берем первую модель)
             best_model = models[0]
             match_status = "✅ Полное соответствие"
             
-            # Простая проверка соответствия по наличию характеристик
             requirements = item.get('requirements') or []
             if requirements and isinstance(requirements, list):
                 specs = best_model.get('specifications', {})
@@ -444,13 +333,11 @@ async def refresh_search_models(callback: CallbackQuery):
                 'match': "❌ Не найдено"
             })
         
-        # Обновляем прогресс каждые 2 позиции
         if idx % 2 == 0 or idx == items_count:
             try:
                 progress_text = f"🔍 Обработано {idx}/{items_count} {_plural(idx, ('позиция', 'позиции', 'позиций'))}\n"
                 progress_text += f"Найдено моделей: {found_count}\n\n"
                 
-                # Показываем последние 3 обработанные позиции
                 for pi in processed_items[-3:]:
                     progress_text += f"• {pi['name']}: {pi['models_count']} шт. {pi['match']}\n"
                 
@@ -460,7 +347,6 @@ async def refresh_search_models(callback: CallbackQuery):
         
         await asyncio.sleep(2)
     
-    # Финальный отчет
     summary_text = f"✅ Поиск завершен!\n\n"
     summary_text += f"📊 Обработано: {items_count} {_plural(items_count, ('позиция', 'позиции', 'позиций'))}\n"
     summary_text += f"🔍 Найдено моделей: {found_count}\n\n"
@@ -528,7 +414,6 @@ async def select_item_model(callback: CallbackQuery):
 
 @router.message(F.text == "👥 Поставщики")
 async def suppliers_menu(message: Message):
-    # Получаем user_id
     user_id = await db.get_or_create_user(
         telegram_id=message.from_user.id,
         name=message.from_user.full_name or "User"
@@ -547,14 +432,13 @@ async def suppliers_menu(message: Message):
     for s in suppliers:
         text += f"🆔 <b>{s['id']}</b> - {s['name']}\n"
         text += f"ИНН: {s.get('inn', 'не указан')}\n"
-        text += f"Город: {s.get('city', 'не указан')}\n"  # изменил region на city
+        text += f"Город: {s.get('city', 'не указан')}\n"
         text += f"Наценка: {s.get('default_margin', 1.2):.0%}\n\n"
     
     await message.answer(text, parse_mode="HTML")
 
 @router.message(Command("add_supplier"))
 async def add_supplier_start(message: Message, state: FSMContext):
-    # Сохраняем user_id в state
     user_id = await db.get_or_create_user(
         telegram_id=message.from_user.id,
         name=message.from_user.full_name or "User"
@@ -579,7 +463,7 @@ async def supplier_inn_received(message: Message, state: FSMContext):
 @router.message(SupplierStates.waiting_contact)
 async def supplier_contact_received(message: Message, state: FSMContext):
     await state.update_data(contact=message.text)
-    await message.answer("🌍 Введите город поставщика:")  # изменил "регион" на "город"
+    await message.answer("🌍 Введите город поставщика:")
     await state.set_state(SupplierStates.waiting_region)
 
 @router.message(SupplierStates.waiting_region)
@@ -619,12 +503,11 @@ async def supplier_margin_received(message: Message, state: FSMContext):
 
 # ============ ГЕНЕРАЦИЯ КП ============
 
-@router.callback_query(F.data.startswith("cp_"))
+@router.callback_query(F.data.startswith("generate_cp_"))
 async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
     logger.info(f"[generate_cp_start] triggered, callback_data={callback.data}")
-    tender_id = int(callback.data.split("_")[1])
+    tender_id = int(callback.data.split("_")[2])
     
-    # Получаем user_id
     user_id = await db.get_or_create_user(
         telegram_id=callback.from_user.id,
         name=callback.from_user.full_name or "User"
@@ -637,8 +520,67 @@ async def generate_cp_start(callback: CallbackQuery, state: FSMContext):
     logger.info(f"[generate_cp_start] found {len(suppliers)} suppliers")
     
     if not suppliers:
-        await callback.answer("Сначала добавьте поставщика через /add_supplier", show_alert=True)
-        return
+        await callback.message.edit_text("🔍 Поставщиков нет в базе. Запускаю автопоиск...\nЭто займет 1-2 минуты.")
+        
+        tender = await db.get_tender(tender_id)
+        if not tender:
+            await callback.answer("Тендер не найден", show_alert=True)
+            return
+        
+        items = await db.get_tender_items(tender_id)
+        if not items:
+            await callback.answer("Позиции тендера не найдены", show_alert=True)
+            return
+        
+        search_query = items[0].get('name', tender.get('name', 'товары'))
+        
+        found_suppliers = await search_suppliers_web(search_query, max_results=5)
+        
+        if not found_suppliers:
+            await callback.message.edit_text(
+                "❌ Поставщики не найдены автоматически.\n\n"
+                "Добавьте поставщика вручную через /add_supplier"
+            )
+            await callback.answer()
+            return
+        
+        added_count = 0
+        for s_info in found_suppliers:
+            try:
+                contact_parts = []
+                if s_info.get('phone'):
+                    contact_parts.append(s_info['phone'])
+                if s_info.get('email'):
+                    contact_parts.append(s_info['email'])
+                contact = " | ".join(contact_parts) if contact_parts else "Не указано"
+                
+                await add_supplier(
+                    name=s_info.get('name', 'Неизвестно')[:100],
+                    inn='0000000000',
+                    contact=contact[:200],
+                    region='Москва',
+                    margin=1.25,
+                    user_id=user_id
+                )
+                added_count += 1
+                logger.info(f"[generate_cp_start] Добавлен поставщик: {s_info.get('name')}")
+            except Exception as e:
+                logger.warning(f"[generate_cp_start] Не удалось добавить поставщика {s_info.get('name')}: {e}")
+        
+        if added_count == 0:
+            await callback.message.edit_text(
+                "❌ Не удалось добавить поставщиков.\n\n"
+                "Добавьте поставщика вручную через /add_supplier"
+            )
+            await callback.answer()
+            return
+        
+        suppliers = await get_suppliers(user_id)
+        
+        await callback.message.edit_text(
+            f"✅ Найдено и добавлено {added_count} поставщиков!\n\n"
+            "Выберите поставщика для КП:"
+        )
     
     text = "👥 Выберите поставщика для КП:\n\n"
     for s in suppliers:
@@ -721,7 +663,6 @@ async def handle_export(callback: CallbackQuery):
     format_type = parts[1]
     tender_id = int(parts[2])
     
-    # Получаем последнее КП для тендера
     cps = await list_cps(tender_id)
     if not cps:
         await callback.answer("Сначала сгенерируйте КП", show_alert=True)
@@ -748,11 +689,9 @@ async def handle_export(callback: CallbackQuery):
             await callback.answer("Неизвестный формат", show_alert=True)
             return
         
-        # Сохраняем во временный файл
         temp_path = Path(tempfile.gettempdir()) / filename
         temp_path.write_bytes(buffer.read())
         
-        # Отправляем файл
         await callback.message.answer_document(
             FSInputFile(temp_path, filename=filename),
             caption=f"✅ Коммерческое предложение #{cps[0]['id']}"
@@ -771,7 +710,6 @@ async def handle_export(callback: CallbackQuery):
 
 @router.message(F.text == "📊 Статистика")
 async def show_stats(message: Message):
-    # Получаем user_id
     user_id = await db.get_or_create_user(
         telegram_id=message.from_user.id,
         name=message.from_user.full_name or "User"
@@ -792,6 +730,13 @@ async def show_stats(message: Message):
     
     await message.answer(text, parse_mode="HTML")
 
+# ============ CATCH-ALL (ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ) ============
+
+@router.callback_query()
+async def catch_all_callbacks(callback: CallbackQuery):
+    logger.warning(f"[catch_all] Unhandled callback: {callback.data}")
+    await callback.answer(f"❌ Handler не найден для: {callback.data}", show_alert=True)
+
 # ============ MAIN ============
 
 async def main():
@@ -799,7 +744,6 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     
-    # Создаем pool перед init_db
     pool = await db.create_pool()
     await db.set_pool(pool)
     
