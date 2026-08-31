@@ -444,7 +444,7 @@ async def suppliers_menu(message: Message):
     for s in suppliers:
         text += f"🆔 <b>{s['id']}</b> - {s['name']}\n"
         text += f"ИНН: {s.get('inn', 'не указан')}\n"
-        text += f"Регион: {s.get('region', 'не указан')}\n"
+        text += f"Город: {s.get('city', 'не указан')}\n"  # изменил region на city
         text += f"Наценка: {s.get('default_margin', 1.2):.0%}\n\n"
     
     await message.answer(text, parse_mode="HTML")
@@ -476,7 +476,7 @@ async def supplier_inn_received(message: Message, state: FSMContext):
 @router.message(SupplierStates.waiting_contact)
 async def supplier_contact_received(message: Message, state: FSMContext):
     await state.update_data(contact=message.text)
-    await message.answer("🌍 Введите регион поставщика:")
+    await message.answer("🌍 Введите город поставщика:")  # изменил "регион" на "город"
     await state.set_state(SupplierStates.waiting_region)
 
 @router.message(SupplierStates.waiting_region)
