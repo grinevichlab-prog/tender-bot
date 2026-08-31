@@ -115,10 +115,10 @@ async def create_tender(user_id: int, name: str, number: str | None, region: str
     
     async with pool.acquire() as conn:
         tender_id = await conn.fetchval(
-            """INSERT INTO tenders (user_id, name, number, region, chat_id, thread_id, created_at)
-               VALUES ($1, $2, $3, $4, $5, $6, NOW()) 
+            """INSERT INTO tenders (user_id, name, region, chat_id, thread_id, created_at)
+               VALUES ($1, $2, $3, $4, $5, NOW()) 
                RETURNING id""",
-            user_id, name, number, region, chat_id, thread_id
+            user_id, name, region, chat_id, thread_id
         )
         return tender_id
 
@@ -131,7 +131,7 @@ async def get_tender(tender_id: int) -> dict | None:
 async def get_user_tenders(user_id: int) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, name, number, created_at FROM tenders WHERE user_id = $1 ORDER BY created_at DESC",
+            "SELECT id, name, created_at FROM tenders WHERE user_id = $1 ORDER BY created_at DESC",
             user_id
         )
         return [dict(r) for r in rows]
