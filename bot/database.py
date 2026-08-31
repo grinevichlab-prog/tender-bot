@@ -152,6 +152,8 @@ async def sync_tender_items(tender_id: int, items: list[dict]):
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM tender_items WHERE tender_id = $1", tender_id)
         for item in items:
+            requirements = item.get('requirements') or {}
+            
             await conn.execute(
                 """INSERT INTO tender_items 
                    (tender_id, position_number, name, quantity, unit, requirements)
@@ -161,7 +163,7 @@ async def sync_tender_items(tender_id: int, items: list[dict]):
                 item.get('name'),
                 item.get('quantity'),
                 item.get('unit'),
-                json.dumps(item.get('requirements'), ensure_ascii=False) if item.get('requirements') else None
+                json.dumps(requirements, ensure_ascii=False)
             )
 
 async def get_tender_items(tender_id: int) -> list[dict]:
