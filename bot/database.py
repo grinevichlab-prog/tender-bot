@@ -31,7 +31,58 @@ async def create_pool():
 async def set_pool(p):
     global pool
     pool = p
+async def save_models(tender_item_id: int, models: list[dict]):
+    """Сохраняет найденные модели для позиции тендера"""
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        # Удаляем старые модели для этой позиции
+        await conn.execute("DELETE FROM models WHERE tender_item_id = $1", tender_item_id)
+        
+        # Вставляем новые
+        for model in models:
+            await conn.execute("""
+                INSERT INTO models 
+                (tender_item_id, manufacturer, model, product_name, specifications, 
+                 price, currency, availability, source_url, source_title)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """,
+                tender_item_id,
+                model.get('manufacturer'),
+                model.get('model'),
+                model.get('product_name'),
+                json.dumps(model.get('specifications', {})),
+                model.get('price'),
+                model.get('currency', 'RUB'),
+                model.get('availability'),
+                model.get('source_url'),
+                model.get('source_title')
+            )
+    finally:
+        await conn.close()
 
+async def get_models(tender_item_id: int) -> list[dict]:
+    """Получает найденные модели для позиции"""
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            "SELECT * FROM models WHERE tender_item_id = $1 ORDER BY id",
+            tender_item_id
+        )
+        return [dict(r) for r in rows]
+    finally:
+        await conn.close()
+
+async def select_model(tender_item_id: int, model_id: int):
+    """Привязывает выбранную модель к позиции тендера"""
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute("""
+            UPDATE tender_items 
+            SET selected_model_id = $1 
+            WHERE id = $2
+        """, model_id, tender_item_id)
+    finally:
+        await conn.close()
 
 # ============================================================
 # СОЗДАНИЕ ТАБЛИЦ
