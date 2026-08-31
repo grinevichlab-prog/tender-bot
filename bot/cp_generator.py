@@ -1,4 +1,5 @@
 import asyncpg
+import json
 from datetime import datetime, timedelta
 from config.settings import DATABASE_URL
 
@@ -23,23 +24,30 @@ async def generate_cp(tender_id: int, supplier_id: int, delivery_days: int, paym
             tender_id
         )
         
+        if not items:
+            return {"error": "Позиции тендера не найдены"}
+        
         cp_items = []
         total = 0.0
-        margin = supplier['default_margin'] or 1.2
+        margin = supplier.get('default_margin') or 1.2
         
         for item in items:
-            base_price = item['model_price'] or item.get('estimated_price') or 0
-            final_price = base_price * margin
-            quantity = item['quantity'] or 1
+            base_price = item.get('model_price') or item.get('estimated_price') or 0
+            if base_price == 0:
+                # Если цена не найдена, пропускаем или ставим 0
+                base_price = 0
+            
+            final_price = float(base_price) * float(margin)
+            quantity = float(item.get('quantity') or 1)
             sum_price = final_price * quantity
             
             cp_items.append({
-                "position": item['position_number'],
-                "name": item['name'],
-                "manufacturer": item['manufacturer'],
-                "model": item['model'],
+                "position": item.get('position_number'),
+                "name": item.get('name'),
+                "manufacturer": item.get('manufacturer'),
+                "model": item.get('model'),
                 "quantity": quantity,
-                "unit": item['unit'],
+                "unit": item.get('unit'),
                 "price": round(final_price, 2),
                 "sum": round(sum_price, 2)
             })
@@ -48,11 +56,11 @@ async def generate_cp(tender_id: int, supplier_id: int, delivery_days: int, paym
         delivery_date = datetime.now() + timedelta(days=delivery_days)
         
         cp_data = {
-            "tender_name": tender['name'],
+            "tender_name": tender.get('name') or f"Тендер #{tender_id}",
             "tender_number": tender.get('number'),
-            "supplier_name": supplier['name'],
-            "supplier_inn": supplier['inn'],
-            "contact": supplier['contact_person'],
+            "supplier_name": supplier.get('name'),
+            "supplier_inn": supplier.get('inn'),
+            "contact": supplier.get('contact_person'),
             "items": cp_items,
             "total": round(total, 2),
             "vat": round(total * 0.2, 2),
@@ -64,17 +72,23 @@ async def generate_cp(tender_id: int, supplier_id: int, delivery_days: int, paym
             "generated_at": datetime.now().isoformat()
         }
         
-        # сохраняем в БД
+        # Сериализуем в JSON строку для JSONB поля
+        cp_data_json = json.dumps(cp_data, ensure_ascii=False)
+        
+        # Сохраняем в БД
         cp_id = await conn.fetchval(
             """INSERT INTO commercial_offers 
                (tender_id, supplier_id, data, total_amount, created_at)
-               VALUES ($1, $2, $3, $4, NOW()) RETURNING id""",
-            tender_id, supplier_id, cp_data, cp_data['total_with_vat']
+               VALUES ($1, $2, $3::jsonb, $4, NOW()) RETURNING id""",
+            tender_id, supplier_id, cp_data_json, cp_data['total_with_vat']
         )
         
         cp_data['id'] = cp_id
         return cp_data
         
+    except Exception as e:
+        print(f"[generate_cp] error: {e}", flush=True)
+        return {"error": str(e)}
     finally:
         await conn.close()
 
@@ -82,7 +96,13 @@ async def get_cp(cp_id: int) -> dict | None:
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         row = await conn.fetchrow("SELECT * FROM commercial_offers WHERE id = $1", cp_id)
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        # Парсим JSONB обратно в dict если нужно
+        if isinstance(result.get('data'), str):
+            result['data'] = json.loads(result['data'])
+        return result
     finally:
         await conn.close()
 
