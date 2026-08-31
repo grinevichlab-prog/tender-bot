@@ -14,7 +14,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config.settings import BOT_TOKEN
 from bot import database as db
 from bot.ai_analyzer import analyze_tender_document, merge_analyses
-from bot.document_processor import extract_text_from_file
+from bot.parser import extract_text
 from bot.model_search import search_models
 from bot.supplier_manager import add_supplier, get_suppliers, get_supplier, update_supplier, delete_supplier
 from bot.cp_generator import generate_cp, get_cp, list_cps
@@ -114,7 +114,7 @@ async def handle_attachment(message: Message, bot: Bot):
             texts = []
             for f in files:
                 try:
-                    text = extract_text_from_file(str(f))
+                   text = extract_text(str(f), f.suffix)
                     if text and len(text) > 50:
                         texts.append(text)
                         logger.info(f"[extract_text] готово {f.name}, символов: {len(text)}")
