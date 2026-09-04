@@ -257,21 +257,21 @@ async def refresh_search_models(callback: CallbackQuery):
     for item in items:
         await db.delete_models(item['id'])
     
-    await callback.answer("Старые результаты очищены, запускаю поиск заново", show_alert=True)
+    await callback.answer("Старые результаты очищены", show_alert=True)
     
     items_count = len(items)
     items_word = _plural(items_count, ("позиции", "позиций", "позиций"))
     
     await callback.message.edit_text(
         f"🔍 Ищу модели для {items_count} {items_word}...\n"
-        f"Это может занять от 2 до 5 минут."
+        f"Это может занять 2-5 минут."
     )
     
     found_count = 0
     processed_items = []
     
     for idx, item in enumerate(items, 1):
-        logger.info(f"[refresh_search] Ищу модели для позиции {idx}: {item['name']}")
+        logger.info(f"[refresh_search] Позиция {idx}: {item['name']}")
         
         models = await search_models(item, region=None, max_models=10)
         
@@ -281,22 +281,20 @@ async def refresh_search_models(callback: CallbackQuery):
             processed_items.append({
                 'name': item['name'][:40],
                 'models_count': len(models),
-                'match': "✅ Найдено"
+                'match': "✅"
             })
-            logger.info(f"[refresh_search] Найдено {len(models)} моделей")
         else:
-            logger.warning(f"[refresh_search] Модели не найдены")
             processed_items.append({
                 'name': item['name'][:40],
                 'models_count': 0,
-                'match': "❌ Не найдено"
+                'match': "❌"
             })
         
         if idx % 2 == 0 or idx == items_count:
             try:
-                progress_text = f"🔍 Обработано {idx}/{items_count}\nНайдено: {found_count}\n\n"
+                progress_text = f"🔍 {idx}/{items_count} | Найдено: {found_count}\n\n"
                 for pi in processed_items[-3:]:
-                    progress_text += f"• {pi['name']}: {pi['models_count']} {pi['match']}\n"
+                    progress_text += f"{pi['match']} {pi['name']}: {pi['models_count']}\n"
                 await callback.message.edit_text(progress_text)
             except:
                 pass
@@ -304,15 +302,22 @@ async def refresh_search_models(callback: CallbackQuery):
         await asyncio.sleep(2)
     
     await callback.message.edit_text(
-        f"✅ Поиск завершен!\n\n"
-        f"Обработано: {items_count}\n"
-        f"Найдено моделей: {found_count}",
+        f"✅ Поиск завершен!\n\nОбработано: {items_count}\nНайдено: {found_count}",
         reply_markup=tender_actions(tender_id)
     )
 
 @router.callback_query(F.data.startswith("search_"))
 async def search_tender_models(callback: CallbackQuery):
-    # ... остальной код без изменений
+    tender_id = int(callback.data.split("_")[1])
+    items = await db.get_tender_items(tender_id)  # ← ДОБАВЛЕНА ЭТА СТРОКА
+    
+    items_count = len(items)
+    items_word = _plural(items_count, ("позиции", "позиций", "позиций"))
+    
+    await callback.message.edit_text(
+        f"🔍 Ищу модели для {items_count} {items_word}...\n"
+        f"Это может занять от 2 до 5 минут."
+    )
     
     found_count = 0
     processed_items = []
@@ -363,7 +368,7 @@ async def search_tender_models(callback: CallbackQuery):
                 'match': match_status
             })
             
-            logger.info(f"[search_models] Найдено {len(models)} моделей для '{item['name']}', статус: {match_status}")
+            logger.info(f"[search_models] Найдено {len(models)} моделей, статус: {match_status}")
         else:
             logger.warning(f"[search_models] Модели не найдены для '{item['name']}'")
             processed_items.append({
@@ -402,52 +407,6 @@ async def search_tender_models(callback: CallbackQuery):
         reply_markup=tender_actions(tender_id)
     )
     await callback.answer()
-
-@router.callback_query(F.data.startswith("models_"))
-async def show_item_models(callback: CallbackQuery):
-    parts = callback.data.split("_")
-    tender_id = int(parts[1])
-    item_id = int(parts[2])
-    
-    models = await db.get_models(item_id)
-    if not models:
-        await callback.answer("Модели не найдены. Запустите поиск моделей.", show_alert=True)
-        return
-    
-    text = "🔍 <b>Найденные модели:</b>\n\n"
-    for i, m in enumerate(models[:10], 1):
-        text += f"<b>{i}.</b> {m.get('manufacturer', '?')} {m.get('model', '?')}\n"
-        if m.get('price'):
-            text += f"   💰 {m['price']} {m.get('currency', 'RUB')}\n"
-        if m.get('source_url'):
-            text += f"   🔗 {m['source_url'][:50]}...\n"
-        text += "\n"
-    
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=model_select(tender_id, item_id, models))
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("select_"))
-async def select_item_model(callback: CallbackQuery):
-    parts = callback.data.split("_")
-    tender_id = int(parts[1])
-    item_id = int(parts[2])
-    model_idx = int(parts[3])
-    
-    models = await db.get_models(item_id)
-    if model_idx >= len(models):
-        await callback.answer("Модель не найдена", show_alert=True)
-        return
-    
-    selected_model = models[model_idx]
-    await db.select_model(item_id, selected_model['id'])
-    
-    await callback.answer("✅ Модель выбрана", show_alert=True)
-    await callback.message.edit_text(
-        f"✅ Модель выбрана:\n\n"
-        f"{selected_model.get('manufacturer')} {selected_model.get('model')}\n"
-        f"💰 {selected_model.get('price')} {selected_model.get('currency', 'RUB')}",
-        reply_markup=tender_actions(tender_id)
-    )
 
 # ============ ПОСТАВЩИКИ ============
 
